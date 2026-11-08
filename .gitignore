@@ -1,0 +1,7 @@
+# Aucune donnée de service dans le dépôt : campagnes, brouillons, exports, reprises, référentiel
+*.json
+!apps-script/appsscript.json
+*.csv
+*.xlsx
+*.pdf
+.clasp.json
