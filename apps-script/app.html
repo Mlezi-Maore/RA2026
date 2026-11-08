@@ -1,0 +1,1594 @@
+<script>
+'use strict';
+/* ==========================================================================
+   Outil RA Mlezi Maore — cœur : utilitaires, stockage, adapters, imports
+   ========================================================================== */
+const SCHEMA = 'ra-mlezi/1';
+const MOIS = ['Janv.','Févr.','Mars','Avr.','Mai','Juin','Juil.','Août','Sept.','Oct.','Nov.','Déc.'];
+const MOIS_N = ['janvier','fevrier','mars','avril','mai','juin','juillet','aout','septembre','octobre','novembre','decembre'];
+const STATUTS = ['À lancer','En rédaction','Transmis au directeur','Transmis au Siège','À corriger','Contrôlé','Validé'];
+const BADGE = {'À lancer':'b-lancer','En rédaction':'b-redac','Transmis au directeur':'b-dir','Transmis au Siège':'b-siege','À corriger':'b-corr','Contrôlé':'b-ctrl','Validé':'b-valid'};
+const DEFAULT_PARAMS = {
+  adresse: '6, rue du Jardin Fleuri – 97600 Mamoudzou',
+  mention: 'Mlezi est une association de GROUPE SOS',
+  approbateur: 'Thierry LANDE',
+  annexeEcartsValide: false
+};
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const clone = o => JSON.parse(JSON.stringify(o));
+const nowISO = () => new Date().toISOString();
+const today = () => new Date().toISOString().slice(0, 10);
+const frDate = iso => { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? String(iso) : d.toLocaleDateString('fr-FR'); };
+const frDateTime = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleString('fr-FR', {dateStyle: 'short', timeStyle: 'short'}); };
+
+function norm(s) {
+  return String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+    .replace(/[’`]/g, "'").replace(/\s+/g, ' ').trim();
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function num(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  let s = String(v).replace(/[\s  €]/g, '');
+  const pct = s.endsWith('%'); if (pct) s = s.slice(0, -1);
+  if (s === '' || s === '-') return null;
+  s = s.replace(',', '.');
+  if (!/^-?\d*\.?\d+(e-?\d+)?$/i.test(s)) return null;
+  const n = parseFloat(s); return pct ? n / 100 : n;
+}
+const fmt = (n, d = 0) => (n === null || n === undefined || n === '' || isNaN(n)) ? '—' : Number(n).toLocaleString('fr-FR', {maximumFractionDigits: d});
+const pct = n => (n === null || n === undefined || !isFinite(n)) ? '—' : (n * 100).toLocaleString('fr-FR', {maximumFractionDigits: 1}) + ' %';
+const sum = a => a.reduce((s, x) => s + (num(x) || 0), 0);
+const uniq = a => [...new Set(a.filter(x => x !== '' && x != null))];
+
+function parseDate(s) { // JJ/MM/AAAA[ hh:mm] ou AAAA-MM-JJ → AAAA-MM-JJ
+  s = String(s ?? '').trim();
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return m[0];
+  return null;
+}
+function parseLooseDate(s) { // JJ/MM/AAAA | MM/AAAA | AAAA → Date
+  s = String(s ?? '').trim(); let m;
+  if ((m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) return new Date(+m[3], +m[2] - 1, +m[1]);
+  if ((m = s.match(/^(\d{1,2})\/(\d{4})$/))) return new Date(+m[2], +m[1] - 1, 1);
+  if ((m = s.match(/^(\d{4})-(\d{2})(-(\d{2}))?$/))) return new Date(+m[1], +m[2] - 1, +(m[4] || 1));
+  if ((m = s.match(/^(\d{4})$/))) return new Date(+m[1], 0, 1);
+  return null;
+}
+const addYears = (d, n) => new Date(d.getFullYear() + n, d.getMonth(), d.getDate());
+
+/* ---------- CSV ---------- */
+function parseCSV(text, sep, onRow) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  if (!sep) { const nl = text.indexOf('\n'); const first = text.slice(0, nl > 0 ? nl : text.length); sep = first.split(';').length >= first.split(',').length ? ';' : ','; }
+  const rows = []; let row = [], f = '', q = false;
+  const push = () => { if (row.some(x => x !== '')) { if (onRow) onRow(row); else rows.push(row); } row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === sep) { row.push(f); f = ''; }
+    else if (c === '\n') { row.push(f); f = ''; push(); }
+    else if (c !== '\r') f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); push(); }
+  return rows;
+}
+function toCSV(rows) {
+  return '﻿' + rows.map(r => r.map(v => { v = v == null ? '' : String(v); return /[";\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(';')).join('\r\n');
+}
+function download(name, data, mime) {
+  const blob = data instanceof Blob ? data : new Blob([data], {type: mime || 'application/octet-stream'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+}
+const safeName = s => norm(s).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 60);
+
+/* ---------- Empreinte ---------- */
+function stable(o) {
+  if (o === null || typeof o !== 'object') return JSON.stringify(o);
+  if (Array.isArray(o)) return '[' + o.map(stable).join(',') + ']';
+  return '{' + Object.keys(o).sort().filter(k => o[k] !== undefined).map(k => JSON.stringify(k) + ':' + stable(o[k])).join(',') + '}';
+}
+async function hashOf(o) {
+  const s = stable(o);
+  try {
+    const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    return 'sha256:' + [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return 'fnv:' + h.toString(16);
+  }
+}
+
+/* ---------- Stockage local (IndexedDB) ---------- */
+const DB = {
+  db: null, warned: false,
+  async open() {
+    if (this.db) return this.db;
+    this.db = await new Promise((res, rej) => {
+      const r = indexedDB.open('ra-mlezi', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return this.db;
+  },
+  async get(k) {
+    try { const db = await this.open(); return await new Promise((res, rej) => { const t = db.transaction('kv').objectStore('kv').get(k); t.onsuccess = () => res(t.result); t.onerror = () => rej(t.error); }); }
+    catch (e) { this.fail(e); return undefined; }
+  },
+  async set(k, v) {
+    try { const db = await this.open(); await new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+    catch (e) { this.fail(e); }
+  },
+  fail(e) {
+    if (this.warned) return; this.warned = true;
+    toast("Sauvegarde automatique impossible dans ce navigateur. Utilisez « Enregistrer » pour télécharger le fichier .json.", 7000);
+    console.warn(e);
+  }
+};
+let saveTimer = null;
+function autosave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    if (S.camp) DB.set('campaign', S.camp);
+    if (S.br) DB.set('brouillon', S.br);
+  }, 600);
+}
+
+/* ---------- UI : toast et modales ---------- */
+function toast(msg, ms = 3500) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), ms); }
+function modalForm(title, fields, opts = {}) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal"><h3>${esc(title)}</h3>${opts.intro ? `<p class="small">${opts.intro}</p>` : ''}
+      ${fields.map(f => `<div class="fld"><label class="${f.required ? 'req' : ''}">${esc(f.label)}</label>
+        ${f.type === 'textarea' ? `<textarea data-k="${f.k}" maxlength="${f.max || 5000}">${esc(f.value || '')}</textarea>`
+          : f.type === 'select' ? `<select data-k="${f.k}">${f.options.map(o => `<option ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`
+          : `<input type="text" data-k="${f.k}" value="${esc(f.value || '')}" maxlength="${f.max || 300}">`}
+        ${f.max ? `<div class="cnt" data-c="${f.k}"></div>` : ''}</div>`).join('')}
+      <div class="act"><button class="btn ghost" data-a="no">Annuler</button><button class="btn" data-a="ok">${esc(opts.ok || 'Valider')}</button></div></div>`;
+    document.body.appendChild(bg);
+    const upd = () => fields.forEach(f => { if (f.max) { const el = $(`[data-k="${f.k}"]`, bg); $(`[data-c="${f.k}"]`, bg).textContent = `${el.value.length} / ${f.max}`; } });
+    bg.addEventListener('input', upd); upd();
+    const first = $('[data-k]', bg); if (first) first.focus();
+    bg.addEventListener('click', e => {
+      const a = e.target.dataset.a; if (!a) return;
+      if (a === 'no') { bg.remove(); resolve(null); return; }
+      const out = {}; for (const f of fields) { out[f.k] = $(`[data-k="${f.k}"]`, bg).value.trim(); if (f.required && !out[f.k]) { toast(`« ${f.label} » est obligatoire.`); return; } }
+      bg.remove(); resolve(out);
+    });
+  });
+}
+const confirmBox = (title, text, ok = 'Confirmer') => modalForm(title, [], {intro: text, ok}).then(r => !!r);
+async function askActor(role) {
+  const r = await modalForm('Qui effectue cette action ?', [
+    {k: 'nom', label: 'Nom et prénom', value: S.actor?.nom || '', required: true},
+    {k: 'fonction', label: 'Fonction', value: S.actor?.fonction || role || '', required: true}
+  ], {intro: "L'outil n'a pas d'authentification : le nom et la fonction déclarés sont inscrits au journal du RA."});
+  if (r) S.actor = r; return r;
+}
+
+/* ---------- Adapters (couche d'import remplaçable par Apps Script) ---------- */
+const adapters = {
+  async readWorkbook(file) {
+    const n = file.name.toLowerCase();
+    if (n.endsWith('.csv') || n.endsWith('.txt')) return {[file.name.replace(/\.[^.]+$/, '')]: parseCSV(await file.text())};
+    const wb = XLSX.read(await file.arrayBuffer(), {type: 'array'});
+    const out = {}; wb.SheetNames.forEach(s => { out[s] = XLSX.utils.sheet_to_json(wb.Sheets[s], {header: 1, raw: true, defval: ''}); });
+    return out;
+  },
+  readText: file => file.text(),
+  readDataURL: file => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(file); }),
+  // Photos : réduites à 1600 px de large au plus, en JPEG qualité 0,8 (PNG conservé s'il est déjà plus léger)
+  async readImage(file, maxW = 1600) {
+    const src = await adapters.readDataURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+      const k = Math.min(1, maxW / img.naturalWidth), cv = document.createElement('canvas');
+      cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+      const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      const out = cv.toDataURL('image/jpeg', 0.8);
+      return out.length < src.length ? out : src;
+    } catch (e) { return src; }
+  }
+};
+
+/* ---------- État ---------- */
+const S = {camp: null, br: null, actor: null, view: 'campagne', qcRA: null, sel: new Set()};
+
+function newCampaign(annee) {
+  return {schemaVersion: SCHEMA, kind: 'campagne', annee, params: clone(DEFAULT_PARAMS), logos: {mlezi: '', sos: ''},
+    referentiel: [], ras: [], activite: {N: null, N1: null}, sheetLinks: {}, fei: null,
+    ageval: AGEVAL_INIT.map(([prefix, service, sid, note]) => ({prefix, service, sid, note: note || ''})),
+    registre: {}, organigrammes: {}, orgaOrphans: [], brouillons: {}, controles: {}, createdAt: nowISO()};
+}
+const getRA = id => S.camp.ras.find(r => r.id === id);
+const redacteur = ra => ra.chef || ra.directeur;
+function addJournal(target, statut, actor, commentaire) {
+  target.journal = target.journal || [];
+  target.journal.push({date: nowISO(), statut, nom: actor?.nom || '', fonction: actor?.fonction || '', commentaire: commentaire || ''});
+  target.statut = statut;
+}
+
+/* ---------- Référentiel ---------- */
+const REF_COLS = ['service_id','service','secteur','direction','type_gestion','directeur','chef_de_service','esms','finess','fiabilite_esms','analytiques','sites','communes'];
+function parseReferentiel(sheets) {
+  const aoa = sheets['vue_service'] || Object.values(sheets).find(a => a.some(r => r.some(c => norm(c) === 'service_id')));
+  if (!aoa) throw new Error("Onglet « vue_service » introuvable (aucune colonne service_id).");
+  const hi = aoa.findIndex(r => r.some(c => norm(c) === 'service_id'));
+  const H = aoa[hi].map(norm); const col = k => H.indexOf(k);
+  const need = ['service_id','service','secteur','direction','directeur','chef_de_service','esms','finess','analytiques','sites','communes'];
+  const miss = need.filter(k => col(k) < 0);
+  if (miss.length) throw new Error('Colonnes absentes du référentiel : ' + miss.join(', '));
+  return aoa.slice(hi + 1).filter(r => String(r[col('service_id')] ?? '').trim()).map(r => {
+    const o = {}; REF_COLS.forEach(k => { o[k] = col(k) >= 0 ? String(r[col(k)] ?? '').trim() : ''; }); return o;
+  });
+}
+const isEsms = v => { const n = norm(v); return !!n && !['non','-','0','false','n/a','na','faux'].includes(n); };
+const codesOf = s => String(s || '').split(/[,;\s]+/).map(x => x.trim()).filter(x => /^\d{3,6}$/.test(x));
+function newRA(r) {
+  const ra = {id: 'RA-' + r.service_id, services: [r.service_id], libelle: r.service, secteur: r.secteur, direction: r.direction,
+    directeur: r.directeur, chef: r.chef_de_service, esms: isEsms(r.esms), finess: r.finess, sites: r.sites, communes: r.communes,
+    analytiques: codesOf(r.analytiques), cvs_obligatoire: false, smjpm: /smjpm|mandataire/i.test(r.service), statut: 'À lancer', journal: []};
+  addJournal(ra, 'À lancer', {nom: 'Siège', fonction: 'Calcul du périmètre'}, 'RA créé depuis le référentiel');
+  return ra;
+}
+function applyReferentiel(rows) {
+  const c = S.camp; c.referentiel = rows; const byId = Object.fromEntries(rows.map(r => [r.service_id, r]));
+  if (!c.ras.length) c.ras = rows.map(newRA);
+  else {
+    const covered = new Set(c.ras.flatMap(r => r.services));
+    rows.forEach(r => { if (!covered.has(r.service_id)) c.ras.push(newRA(r)); });
+    c.ras.forEach(ra => {
+      const rs = ra.services.map(id => byId[id]).filter(Boolean);
+      ra.absentRef = rs.length === 0;
+      if (rs.length === 1 && !ra.split && !ra.merged) {
+        const r = rs[0]; Object.assign(ra, {secteur: r.secteur, direction: r.direction, directeur: r.directeur, chef: r.chef_de_service, finess: r.finess, sites: r.sites, communes: r.communes});
+      }
+    });
+  }
+  seedRegistre();
+  if (S.camp.reprise && typeof feedRegistre === 'function') feedRegistre();
+}
+function splitRA(id) {
+  const ra = getRA(id); if (ra.analytiques.length < 2) { toast("Ce RA n'a qu'un code analytique : rien à scinder."); return; }
+  const parts = ra.analytiques.map(code => { const p = clone(ra); p.id = ra.id + '-' + code; p.analytiques = [code]; p.libelle = ra.libelle + ' (' + code + ')'; p.split = true; p.journal = []; addJournal(p, 'À lancer', {nom: 'Siège', fonction: 'Périmètre'}, 'Scission de ' + ra.libelle); return p; });
+  const i = S.camp.ras.indexOf(ra); S.camp.ras.splice(i, 1, ...parts); delete S.camp.registre[ra.id]; seedRegistre();
+}
+function mergeRAs(ids) {
+  const ras = ids.map(getRA); const m = clone(ras[0]);
+  Object.assign(m, {id: 'RA-' + uniq(ras.flatMap(r => r.services)).join('+'), services: uniq(ras.flatMap(r => r.services)), analytiques: uniq(ras.flatMap(r => r.analytiques)),
+    libelle: ras.map(r => r.libelle).join(' / '), finess: uniq(ras.flatMap(r => String(r.finess).split(/[,;]\s*/))).join(', '),
+    sites: uniq(ras.flatMap(r => String(r.sites).split(/[,;]\s*/))).join(', '), communes: uniq(ras.flatMap(r => String(r.communes).split(/[,;]\s*/))).join(', '),
+    esms: ras.some(r => r.esms), cvs_obligatoire: ras.some(r => r.cvs_obligatoire), merged: true, split: false, journal: []});
+  addJournal(m, 'À lancer', {nom: 'Siège', fonction: 'Périmètre'}, 'Fusion de ' + ras.map(r => r.libelle).join(', '));
+  const i = S.camp.ras.indexOf(ras[0]); S.camp.ras = S.camp.ras.filter(r => !ids.includes(r.id)); S.camp.ras.splice(Math.min(i, S.camp.ras.length), 0, m);
+  ids.forEach(id => delete S.camp.registre[id]); seedRegistre();
+}
+
+/* ---------- Activité ---------- */
+const LINE_DEFS = [
+  ['jours', ["nombre jours d'ouverture", "nombre de jours d'ouverture", "nb jours d'ouverture", "jours d'ouverture"]],
+  ['theorique', ['volume activite theorique', "volume d'activite theorique", 'volume theorique']],
+  ['previsionnel', ['volume activite previsionnel', "volume d'activite previsionnel", 'volume previsionnel']],
+  ['realise', ['nombre journees reel', 'nombre de journees reel', 'nombre journees realisees', 'nombre de journees realisees', 'activite realisee', 'volume activite realise']],
+  ['facturation', ['montant de la facturation', 'montant facturation', 'facturation']],
+  ['file_active', ['file active']]
+];
+const PARAM_DEFS = [['prix', 'prix journalier'], ['jours_cible', "jours d'ouverture cible"], ['places', 'nb de places'], ['places', 'nombre de places'], ['places', 'nb de mineurs'], ['places', 'nombre de mineurs'], ['taux_prev', "taux d'occupation previsionnel"], ['financeur', 'type de gestion'], ['financeur', 'financeur']];
+const LINE_LABELS = {jours: "Jours d'ouverture", theorique: 'Volume théorique', previsionnel: 'Volume prévisionnel', realise: 'Réalisé', facturation: 'Facturation (€)', file_active: 'File active'};
+
+function parseActivitySheet(name, aoa, file) {
+  let hr = -1, lc = -1;
+  for (let r = 0; r < Math.min(aoa.length, 40); r++) { const i = aoa[r].findIndex(c => norm(c) === 'periode' || norm(c) === 'periode :'); if (i >= 0) { hr = r; lc = i; break; } }
+  if (hr < 0) return null;
+  const H = aoa[hr].map(norm);
+  const mcols = MOIS_N.map(m => H.findIndex(h => h === m || h.startsWith(m)));
+  const tcol = H.findIndex(h => h === 'total');
+  if (mcols.filter(x => x >= 0).length < 6) return null;
+  const params = {}; let code = null, libelle = name;
+  const pr = aoa.slice(0, hr).find(r => r.some(c => norm(c).startsWith('dispositif')));
+  if (pr) {
+    const cells = pr.map(c => String(c ?? '').trim());
+    // Zone d'identification : entre « Dispositif: » et la première étiquette de paramètre
+    const di = cells.findIndex(c => norm(c).startsWith('dispositif'));
+    let pe = cells.findIndex((c, i) => i > di && PARAM_DEFS.some(d => norm(c).startsWith(d[1]))); if (pe < 0) pe = cells.length;
+    const seg = cells.slice(di + 1, pe).filter(Boolean);
+    const cc = seg.find(c => /^\d{3}(\d{3})?$/.test(c)); if (cc) code = cc;
+    const libs = seg.filter(c => c !== cc); if (libs.length) libelle = libs.reduce((a, b) => b.length > a.length ? b : a);
+    cells.forEach((c, i) => {
+      const n = norm(c); const d = PARAM_DEFS.find(d => n.startsWith(d[1]));
+      if (d && params[d[0]] === undefined) {
+        const v = cells.slice(i + 1).find(x => x !== '');
+        if (v !== undefined && !PARAM_DEFS.some(dd => norm(v).startsWith(dd[1]))) { params[d[0]] = d[0] === 'financeur' ? v : (num(v) ?? v); if (d[0] === 'places') params.places_label = c.replace(/\s*:$/, ''); }
+      }
+    });
+  }
+  if (!code) { const m = String(name).match(/^\s*(\d{3}(?:\d{3})?)\b/); if (m) code = m[1]; }
+  const lines = {}, totals = {};
+  for (let r = hr + 1; r < aoa.length; r++) {
+    const lab = norm(aoa[r][lc]); if (!lab || lab.includes('cumul')) continue;
+    const def = LINE_DEFS.find(([k, syn]) => !lines[k] && syn.some(s => lab === s || lab.startsWith(s)));
+    if (!def) continue;
+    lines[def[0]] = mcols.map(ci => ci >= 0 ? num(aoa[r][ci]) : null);
+    totals[def[0]] = tcol >= 0 ? num(aoa[r][tcol]) : null;
+  }
+  const missing = lines.realise ? lines.realise.map((v, i) => v === null ? i : -1).filter(i => i >= 0) : [...Array(12).keys()];
+  return {name, file, code, libelle, params, lines, totals, missing};
+}
+async function importActivity(files, yk) {
+  const sheets = S.camp.activite[yk]?.sheets || [];
+  const report = {ok: 0, ignored: []};
+  for (const f of files) {
+    const wb = await adapters.readWorkbook(f);
+    for (const [name, aoa] of Object.entries(wb)) {
+      const sh = parseActivitySheet(name, aoa, f.name);
+      if (!sh) { report.ignored.push(`${f.name} › ${name}`); continue; }
+      const i = sheets.findIndex(s => s.name === name && s.file === f.name);
+      if (i >= 0) sheets[i] = sh; else sheets.push(sh); report.ok++;
+    }
+  }
+  S.camp.activite[yk] = {sheets, importedAt: nowISO()};
+  return report;
+}
+function rasForSheet(sh, yk) {
+  const key = yk + '|' + sh.file + '|' + sh.name;
+  if (key in S.camp.sheetLinks) return S.camp.sheetLinks[key] ? [S.camp.sheetLinks[key]] : [];
+  if (!sh.code) return [];
+  return S.camp.ras.filter(ra => ra.analytiques.some(c => sh.code.length >= 6 ? c === sh.code : c.startsWith(sh.code))).map(r => r.id);
+}
+const sheetsForRA = (ra, yk) => (S.camp.activite[yk]?.sheets || []).filter(sh => rasForSheet(sh, yk).includes(ra.id));
+
+/* ---------- FEI Ageval ---------- */
+const FEI_POS = [[1,'Numéro'],[10,'Date'],[13,'Etablissement'],[14,'Service'],[15,'Catégorie'],[16,'Typologie'],[27,"Etat d'avancement"],[41,'Gravité'],[47,'Déclarations obligatoires - Type'],[49,'Date de clôture']];
+const FEI_FORBIDDEN = ['description des faits', 'personnes concernees'];
+const AGEVAL_INIT = [
+  ['4b1.','Unité Sud','S23'],['4b2.','Unité Sud','S23'],['4b1.','Unité Centre','S24'],['4b2.','Unité Centre','S24'],
+  ['4b1.','Unité Petite Terre','S30'],['4b2.','Unité Petite Terre','S30'],['4b1.','Unité MDZ','S31'],['4b2.','Unité MDZ','S31'],
+  ['4b1.','Unité PH','','à rattacher manuellement'],['4b2.','Unité PH','','à rattacher manuellement'],['4b1.','UEAA','','à rattacher manuellement'],['4b2.','UEAA','','à rattacher manuellement'],['4b1.','Unité Nord','','à rattacher manuellement'],['4b2.','Unité Nord','','à rattacher manuellement'],
+  ['4b3.','*','S29'],['4b5.','*','S28'],['4b4.','*','S26'],['4b6.a','*','S22'],['4b6.b','*','S33'],['4b6.c','*','S25'],['4b7.','*','S32'],['4b9.','*','S27'],
+  ['4a1.','*','S16'],['4a2.','*','S07'],['4a3.','*','S08'],['4a4.','*','S17'],['4a5.','*','S20'],['4a6.','*','S05'],['4a8.','*','S12'],['4a12.','*','S09'],
+  ['4c1.','*','S36'],['4c2.','HI (','S34'],['4c2.','HU (','S34'],['4c2.','IML','S38'],['4c3.','*','S37'],['4c7.','*','S19'],['4c8.','*','S18'],
+  ['4c13.','*','S14'],['4c14.','*','S02'],['4c15.','*','S15'],['4d1.','*','S39'],['4d2.','*','S41'],
+  ['4c16.','*','','à trancher : S03 GMS CADEMA ou S04 GMS SUD'],['4c10.','*','','à confirmer : S01 ADJ ?'],['4b8.','*','','absent du référentiel']
+];
+const splitMulti = s => String(s || '').split('|').map(x => x.trim()).filter(x => x && x !== '-');
+
+async function prepareFEI(file) {
+  const text = await adapters.readText(file);
+  let i = 0, err = null; const out = [];
+  parseCSV(text, ';', row => {
+    i++;
+    if (i === 1) { out.push(['Tableau des anomalies', 'Evénements indésirables V2']); return; }
+    if (i === 2) {
+      const bad = FEI_POS.filter(([p, h]) => norm(row[p - 1]) !== norm(h));
+      if (bad.length) err = 'En-têtes inattendus dans l\'export complet : ' + bad.map(([p, h]) => `position ${p} : attendu « ${h} », trouvé « ${row[p - 1] ?? ''} »`).join(' ; ');
+      out.push(FEI_POS.map(x => x[1])); return;
+    }
+    if (err) return;
+    out.push(FEI_POS.map(([p]) => row[p - 1] ?? '')); // lecture par position : seules les colonnes autorisées sont copiées
+  });
+  if (err) throw new Error(err);
+  if (out.length < 2) throw new Error('Fichier vide ou illisible.');
+  download(`FEI_Ageval_export_reduit_${today()}.csv`, toCSV(out), 'text/csv;charset=utf-8');
+  return out.length - 2;
+}
+async function importFEI(file) {
+  const rows = parseCSV(await adapters.readText(file), ';');
+  const hi = norm(rows[0]?.[0]) === 'tableau des anomalies' ? 1 : 0;
+  const H = (rows[hi] || []).map(norm);
+  const allowed = FEI_POS.map(x => norm(x[1]));
+  if (H.some(h => FEI_FORBIDDEN.includes(h)) || H.some(h => h && !allowed.includes(h))) throw new Error('Exportez uniquement les colonnes autorisées (utilisez « Préparer l\'export FEI »).');
+  const ix = allowed.map(h => H.indexOf(h));
+  const miss = allowed.filter((h, k) => ix[k] < 0); if (miss.length) throw new Error('Colonnes manquantes dans l\'export réduit : ' + miss.join(', '));
+  const seen = new Set(), out = []; let doublons = 0, sansDate = 0;
+  rows.slice(hi + 1).forEach(r => {
+    const g = k => String(r[ix[k]] ?? '').trim();
+    const id = g(0); if (id) { if (seen.has(id)) { doublons++; return; } seen.add(id); }
+    const d = parseDate(g(1)); if (!d) { sansDate++; return; }
+    out.push({date: d, etab: g(2), service: g(3), cats: splitMulti(g(4)), typos: splitMulti(g(5)), etat: g(6), grav: g(7), decl: splitMulti(g(8)).filter(x => norm(x) !== 'non'), cloture: parseDate(g(9))});
+  });
+  S.camp.fei = {rows: out, file: file.name, importedAt: nowISO(), doublons, sansDate};
+  return out.length;
+}
+function feiSid(row) {
+  const e = norm(row.etab), s = norm(row.service); let best = null;
+  for (const m of S.camp.ageval) {
+    if (m.exact) { if (norm(m.prefix) === e && norm(m.service) === s) return m.sid || null; continue; }
+    if (!e.startsWith(norm(m.prefix))) continue;
+    if (m.service === '*') { if (!best) best = m; }
+    else if (s.includes(norm(m.service))) { best = m; break; }
+  }
+  return best ? (best.sid || null) : null;
+}
+function sidToRA() { const m = {}; S.camp.ras.forEach(ra => ra.services.forEach(sid => { if (!(sid in m)) m[sid] = ra.id; })); return m; }
+function feiRowsFor(ra) { const map = sidToRA(); return (S.camp.fei?.rows || []).filter(r => { const sid = feiSid(r); return sid && map[sid] === ra.id; }); }
+function feiUnmatched() {
+  const map = sidToRA(), g = {};
+  (S.camp.fei?.rows || []).forEach(r => { const sid = feiSid(r); if (!sid || !map[sid]) { const k = r.etab + '¤' + r.service; (g[k] = g[k] || {etab: r.etab, service: r.service, n: 0, sid: sid || ''}).n++; } });
+  return Object.values(g).sort((a, b) => b.n - a.n);
+}
+function feiAgg(ra, N) {
+  if (!S.camp.fei) return {imported: false};
+  const all = feiRowsFor(ra), rows = all.filter(r => r.date.startsWith(N + '-'));
+  const years = new Set(S.camp.fei.rows.map(r => r.date.slice(0, 4)));
+  const a = {imported: true, annee: N, exportDate: S.camp.fei.importedAt.slice(0, 10), n: rows.length,
+    nN1: years.has(String(N - 1)) ? all.filter(r => r.date.startsWith((N - 1) + '-')).length : null,
+    cats: {}, grav: {'1': 0, '2': 0, '3': 0, '4': 0, '5': 0, 'Non renseignée': 0}, avancement: {'Terminé': 0, 'En cours de traitement': 0, 'Non initié': 0},
+    delai: null, declN: 0, autorites: {}};
+  let dsum = 0, dn = 0;
+  rows.forEach(r => {
+    r.cats.forEach(c => a.cats[c] = (a.cats[c] || 0) + 1);
+    const g = /^[1-5]$/.test(r.grav) ? r.grav : 'Non renseignée'; a.grav[g]++;
+    const e = norm(r.etat);
+    if (e.startsWith('termin')) { a.avancement['Terminé']++; if (r.cloture) { const d = (new Date(r.cloture) - new Date(r.date)) / 864e5; if (d >= 0) { dsum += d; dn++; } } }
+    else if (e.startsWith('non init') || !e) a.avancement['Non initié']++;
+    else a.avancement['En cours de traitement']++;
+    if (r.decl.length) { a.declN++; r.decl.forEach(x => a.autorites[x] = (a.autorites[x] || 0) + 1); }
+  });
+  a.delai = dn ? Math.round(dsum / dn) : null;
+  return a;
+}
+
+/* ---------- Registre 2002-2 ---------- */
+const OUTILS_STD = [
+  {k: 'livret', label: "Livret d'accueil", base: 'L. 311-4 CASF', type: 'date'},
+  {k: 'charte', label: 'Charte des droits et libertés de la personne accueillie', base: 'L. 311-4 ; arrêté du 8 septembre 2003', type: 'charte'},
+  {k: 'contrat', label: 'Contrat de séjour ou DIPC', base: 'L. 311-4 ; D. 311', type: 'contrat'},
+  {k: 'pq', label: 'Personne qualifiée', base: 'L. 311-5', type: 'pq'},
+  {k: 'reglement', label: 'Règlement de fonctionnement', base: 'L. 311-7 ; R. 311-33', type: 'date', revision: 5},
+  {k: 'participation', label: 'CVS ou autre forme de participation', base: 'L. 311-6 ; D. 311-3 et s.', type: 'participation'},
+  {k: 'projet', label: "Projet d'établissement ou de service", base: 'L. 311-8', type: 'date', revision: 5}
+];
+const OUTILS_SMJPM = [
+  {k: 'notice', label: "Notice d'information", base: 'L. 471-6 CASF', type: 'date'},
+  {k: 'charte', label: 'Charte des droits et libertés de la personne protégée', base: 'L. 471-6 (annexée à la notice)', type: 'charte'},
+  {k: 'dipm', label: 'Document individuel de protection des majeurs (DIPM)', base: 'L. 471-8', type: 'date'},
+  ...OUTILS_STD.slice(3)
+];
+const outilsFor = ra => ra.smjpm ? OUTILS_SMJPM : OUTILS_STD;
+const OUTIL_FIELDS = {
+  date: [['date', 'Date (MM/AAAA)']],
+  charte: [['remise', "Remise à l'admission", ['', 'oui', 'non']], ['affichage', 'Affichage', ['', 'oui', 'non']]],
+  contrat: [['type_doc', 'Type', ['', 'Contrat de séjour', 'DIPC']], ['date', 'Date du modèle (MM/AAAA)']],
+  pq: [['communiquee', 'Liste connue et communiquée', ['', 'oui', 'non']]],
+  participation: [['forme', 'Forme', ['', 'CVS', "Groupe d'expression", 'Enquête', 'Autre']], ['debut', 'Début du mandat / acte (MM/AAAA)'], ['reunions', 'Réunions en N']]
+};
+const REG_SEED = {
+  IMEAEC: {charte: {commentaire: 'Charte 2022 (RA 2025)'}, livret: {date: '2022'}, contrat: {type_doc: 'Contrat de séjour', date: '2022'}, reglement: {date: '2022'}, pq: {communiquee: 'non'}, participation: {forme: 'CVS', debut: '2024', commentaire: 'Mandat 2024-2027 ; 2 réunions en 2025'}, projet: {commentaire: 'Réécriture en cours en 2025'}},
+  S36: {livret: {date: '2025'}, contrat: {type_doc: 'Contrat de séjour', date: '2025'}, reglement: {date: '2025'}},
+  S18: {notice: {date: '12/2025'}, charte: {commentaire: '2024 (charte de la personne protégée ?)'}, dipm: {date: '2023'}, reglement: {date: '2022'}, pq: {communiquee: 'non'}, participation: {forme: 'Enquête', commentaire: 'Enquête de satisfaction reportée en 02/2026'}},
+  S08: {charte: {commentaire: '2025'}, livret: {date: '2025'}, contrat: {type_doc: 'DIPC', date: '09/2025'}, reglement: {commentaire: 'Non daté'}, pq: {commentaire: 'Non daté'}, participation: {forme: "Groupe d'expression", commentaire: 'Ateliers trimestriels, à formaliser en 2026'}},
+  S16: {projet: {commentaire: 'Réécriture annoncée en 2024'}, livret: {commentaire: 'Livret FALC non daté'}, reglement: {commentaire: 'En cours de révision'}, contrat: {type_doc: 'DIPC', commentaire: 'Modèle non daté'}},
+  S28: {charte: {commentaire: '2022'}, livret: {date: '2022'}, contrat: {date: '2022'}, reglement: {date: '2022'}, pq: {commentaire: '« 2022 » à vérifier'}, participation: {forme: 'CVS', debut: '04/2025', commentaire: 'CVS élu le 09/04/2025, 2 réunions en 2025'}},
+  S22: {projet: {date: '07/2025'}, livret: {commentaire: 'À réactualiser (non daté)'}, reglement: {commentaire: 'À réactualiser (non daté)'}}
+};
+function seedRegistre() {
+  const c = S.camp;
+  c.ras.filter(ra => ra.esms).forEach(ra => {
+    if (c.registre[ra.id]) return;
+    const reg = {}; outilsFor(ra).forEach(o => reg[o.k] = {});
+    const key = ra.services.find(s => ['S23','S24','S30','S31'].includes(s)) ? 'IMEAEC' : ra.services.find(s => REG_SEED[s]);
+    if (key && REG_SEED[key]) Object.entries(REG_SEED[key]).forEach(([k, v]) => { if (reg[k]) Object.assign(reg[k], v); });
+    c.registre[ra.id] = reg;
+  });
+}
+function outilStatut(o, v, ra, N) {
+  v = v || {}; if (v.sans_objet) return {s: 'Sans objet'};
+  const ref = new Date(N, 11, 31);
+  switch (o.type) {
+    case 'date': case 'contrat': {
+      const d = parseLooseDate(v.date); if (!d) return {s: 'Absent', why: 'aucune date'};
+      if (o.revision && addYears(d, o.revision) < ref) return {s: 'À réviser', why: `${o.k === 'projet' ? 'adoption' : 'dernière révision'} de plus de ${o.revision} ans au 31/12/${N}`};
+      return {s: 'À jour'};
+    }
+    case 'charte':
+      if (v.remise === 'oui' && v.affichage === 'oui') return {s: 'À jour'};
+      if (!v.remise && !v.affichage) return {s: 'Absent', why: 'remise et affichage non renseignés'};
+      return {s: 'À réviser', why: "remise à l'admission ou affichage : non"};
+    case 'pq': return v.communiquee === 'oui' ? {s: 'À jour'} : {s: 'Absent', why: v.communiquee === 'non' ? 'liste non communiquée' : 'non renseigné'};
+    case 'participation': {
+      if (!v.forme) return {s: 'Absent', why: 'aucune forme de participation'};
+      if (ra.cvs_obligatoire && v.forme !== 'CVS') return {s: 'À réviser', why: 'CVS obligatoire (hébergement ou accueil de jour continu)'};
+      if (v.forme === 'CVS') { const d = parseLooseDate(v.debut); if (!d) return {s: 'À réviser', why: 'date de début du mandat absente'}; if (addYears(d, 3) < ref) return {s: 'À renouveler', why: 'mandat de plus de 3 ans'}; }
+      if (v.reunions === '' || v.reunions == null) return {s: 'À réviser', why: `nombre de réunions en ${N} non renseigné`};
+      if (num(v.reunions) === 0) return {s: 'À réviser', why: `aucune réunion en ${N}`};
+      return {s: 'À jour'};
+    }
+  }
+  return {s: 'Absent'};
+}
+function outilSituation(o, v) {
+  v = v || {}; if (v.sans_objet) return 'Sans objet';
+  switch (o.type) {
+    case 'date': return v.date ? (o.k === 'projet' ? 'Adopté en ' : 'Mis à jour en ') + v.date : 'Non daté';
+    case 'contrat': return (v.type_doc || 'Type non précisé') + (v.date ? ' – modèle de ' + v.date : ' – non daté');
+    case 'charte': return `Remise à l'admission : ${v.remise || '?'} ; affichage : ${v.affichage || '?'}`;
+    case 'pq': return 'Liste départementale connue et communiquée : ' + (v.communiquee || 'non renseigné');
+    case 'participation': return v.forme ? `${v.forme}${v.debut ? ' – depuis ' + v.debut : ''}${v.reunions !== '' && v.reunions != null ? ' – ' + v.reunions + ' réunion(s)' : ''}` : 'Aucune';
+  }
+  return '';
+}
+
+/* ---------- Organigrammes ---------- */
+async function importOrganigrammes(files) {
+  let ok = 0;
+  for (const f of files) {
+    if (!/^image\//.test(f.type)) { S.camp.orgaOrphans.push({name: f.name, data: '', date: '', err: 'Format non pris en charge (exporter en PNG ou JPEG)'}); continue; }
+    const data = await adapters.readImage(f, 2000);
+    const date = new Date(f.lastModified || Date.now()).toISOString().slice(0, 10);
+    const m = f.name.match(/^(S\d+)[_\- ]/i);
+    const sid = m && S.camp.referentiel.find(r => norm(r.service_id) === norm(m[1]))?.service_id;
+    if (sid) { S.camp.organigrammes[sid] = {name: f.name, data, date}; ok++; }
+    else S.camp.orgaOrphans.push({name: f.name, data, date});
+  }
+  return ok;
+}
+const orgaForRA = ra => { for (const s of ra.services) if (S.camp.organigrammes[s]) return S.camp.organigrammes[s]; return null; };
+
+/* ==========================================================================
+   Brouillon, saisie encadrée, traçabilité, vérification
+   ========================================================================== */
+const SEP = '|';
+const getP = (o, p) => p.split(SEP).reduce((a, k) => (a == null ? undefined : a[k]), o);
+function setP(o, p, v) { const ks = p.split(SEP); let a = o; ks.slice(0, -1).forEach(k => { if (a[k] == null) a[k] = {}; a = a[k]; }); a[ks[ks.length - 1]] = v; }
+const eff = (br, p) => (p in br.ecarts) ? br.ecarts[p].value : getP(br.sources, p);
+
+const LIMITS = {'intro|contexte': 2500, 'intro|historique': 2500, 'missions': 2500, 'public|texte': 2500, 'activites|texte': 3000, 'rh|formations': 1500,
+  'partenariats|texte': 2000, 'qualite|fei_analyse': 1000, 'bilan|commentaire': 1500, 'qualitatif': 3000, 'conclusion|bilan': 2500, 'avis': 500};
+const TABLES = {
+  'intro|cadre': [['annee', 'Année', 'text', 70], ['texte', 'Texte de référence'], ['apport', 'Apport clé']],
+  'public|ages': [['tranche', "Tranche d'âge"], ['nb', 'Nombre', 'num', 90]],
+  'activites|tableau': [['activite', 'Activité'], ['participants', 'Participants', 'text', 110], ['objectifs', 'Objectifs']],
+  'rh|tableau': [['fonction', 'Fonction'], ['etp_bud', 'ETP budgétés', 'num', 110], ['etp_reel', 'ETP réels', 'num', 110]],
+  'partenariats|tableau': [['partenaire', 'Partenaire'], ['type', 'Type', 'text', 120], ['nature', 'Nature des actions'], ['conv', 'Conventionné', ['', 'oui', 'non'], 100]],
+  'qualite|cvs': [['date', 'Date', 'text', 100], ['participants', 'Participants'], ['sujets', 'Sujets traités']],
+  'bilan|complementaires': [['indicateur', 'Indicateur'], ['valeur', 'Valeur', 'text', 110], ['commentaire', 'Commentaire']],
+  'conclusion|suivi': [['objectif', 'Objectif fixé dans le RA N-1'], ['realisation', 'Réalisation', ['', 'Atteint', 'Partiel', 'Non atteint', 'Reporté'], 130], ['commentaire', 'Commentaire']],
+  'conclusion|perspectives': [['objectif', 'Objectif'], ['actions', 'Actions'], ['echeance', 'Échéance', 'text', 100], ['indicateur', 'Indicateur de suivi']]
+};
+const MODULES = [
+  [ra => /ditep|dime/i.test(ra.libelle), 'DITEP / DIME – activité par modalité', ['File active – internat', 'File active – semi-internat / accueil de jour', 'File active – ambulatoire', 'Bascules entre modalités']],
+  [ra => /camsp/i.test(ra.libelle), 'CAMSP – actes, orienteurs, communes, sorties', ["Nombre d'actes", 'Principaux orienteurs', 'Communes de résidence', 'Sorties et orientations']],
+  [ra => /\bime\b|sessad|ueea/i.test(ra.libelle), 'IME / SESSAD / UEEA – scolarité', ['Enfants scolarisés en milieu ordinaire', "Enfants en unité d'enseignement", 'Temps de scolarisation hebdomadaire moyen', 'Enfants sans scolarisation']],
+  [ra => /\bgem\b/i.test(ra.libelle), 'GEM – exigences du cahier des charges', ["Nombre d'adhérents", "Jours d'ouverture", 'Activités décidées par les adhérents', 'Association marraine']],
+  [ra => /hla|h[ée]bergement/i.test(ra.secteur + ' ' + ra.direction), 'HLA – séjours et sorties', ['Durée moyenne de séjour (jours)', 'Sorties vers un logement autonome', 'Sorties vers un autre hébergement', 'Autres motifs de sortie']]
+];
+const moduleFor = ra => MODULES.find(m => m[0](ra)) || null;
+
+function emptySaisie() {
+  const mvt = () => ({debut: '', entrees: '', sorties: '', fin: ''});
+  return {intro: {contexte: '', historique: '', cadre: []},
+    ident: {adresse: '', telephone: '', mail: '', date_arrete: '', date_ouverture: '', nb_beneficiaires: '', etp_bp: '', financeurs: '', horaires: ''},
+    missions: '', public: {texte: '', femmes: '', hommes: '', ages: []}, activites: {texte: '', tableau: []},
+    rh: {tableau: [], mvt: mvt(), formations: ''}, partenariats: {tableau: [], texte: ''}, qualite: {cvs: [], fei_analyse: ''},
+    bilan: {mvt: mvt(), commentaire: '', complementaires: []}, qualitatif: '', conclusion: {bilan: '', perspectives: [], suivi: []}, annexes: [], avis: ''};
+}
+
+async function buildBrouillon(ra) {
+  const c = S.camp, N = c.annee;
+  const blocks = sheetsForRA(ra, 'N').map(sh => {
+    const b = {sheet: sh.name, file: sh.file, code: sh.code || '', libelle: sh.libelle, params: sh.params, missing: sh.missing};
+    ['jours', 'theorique', 'previsionnel', 'realise', 'facturation', 'file_active'].forEach(k => { if (sh.lines[k]) b[k] = sh.lines[k]; });
+    return b;
+  });
+  const n1 = sheetsForRA(ra, 'N1').map(sh => ({sheet: sh.name, code: sh.code || '', libelle: sh.libelle,
+    theorique: sh.lines.theorique ? sum(sh.lines.theorique) : null, realise: sh.lines.realise ? sum(sh.lines.realise) : null}));
+  const cap = blocks.map(b => num(b.params.places)).filter(x => x != null);
+  const regVals = ra.esms ? clone(c.registre[ra.id] || {}) : null;
+  if (regVals) outilsFor(ra).forEach(o => { regVals[o.k] = Object.assign({commentaire: ''}, regVals[o.k] || {}); OUTIL_FIELDS[o.type].forEach(([f]) => { if (regVals[o.k][f] == null) regVals[o.k][f] = ''; }); });
+  const sources = {
+    identite: {service: ra.libelle, secteur: ra.secteur, direction: ra.direction, directeur: ra.directeur, chef_de_service: ra.chef,
+      esms: ra.esms ? 'Oui' : 'Non', finess: ra.finess, sites: ra.sites, communes: ra.communes, capacite: cap.length ? sum(cap) : null},
+    activiteImportee: !!c.activite.N, activite: blocks, activiteN1: n1, activiteN1Importee: !!c.activite.N1,
+    fei: feiAgg(ra, N),
+    registre: ra.esms ? {outils: outilsFor(ra), values: regVals, cvs_obligatoire: !!ra.cvs_obligatoire} : null,
+    organigramme: orgaForRA(ra)
+  };
+  const br = {schemaVersion: SCHEMA, kind: 'brouillon', annee: N, raId: ra.id,
+    ra: {id: ra.id, libelle: ra.libelle, services: ra.services, secteur: ra.secteur, direction: ra.direction, directeur: ra.directeur, chef: ra.chef, redacteur: redacteur(ra), esms: ra.esms, smjpm: !!ra.smjpm, cvs_obligatoire: !!ra.cvs_obligatoire},
+    params: clone(c.params), logos: clone(c.logos), sources, sourceHash: await hashOf(sources),
+    saisie: emptySaisie(), ecarts: {}, statut: ra.statut, journal: clone(ra.journal), createdAt: nowISO()};
+  applyReprise(br, ra);
+  return br;
+}
+
+/* ---------- Reprise du RA N-1 validé ---------- */
+const REPRISE_SCHEMA = 'ra-mlezi-reprise/1';
+const REPRIS_LABELS = {'intro|historique': 'Historique du service', 'missions': 'Missions et objectifs', 'public|texte': "Public cible et modalités d'accès", 'intro|cadre': 'Cadre légal',
+  'partenariats|tableau': 'Tableau des partenaires', 'ident|adresse': 'Adresse', 'ident|telephone': 'Téléphone', 'ident|mail': 'Mail', 'ident|date_arrete': "Date de l'arrêté d'autorisation",
+  'ident|financeurs': 'Financeurs', 'ident|horaires': "Jours et horaires d'ouverture", 'conclusion|suivi': 'Objectifs fixés dans le RA N-1'};
+function repriseFor(ra) {
+  const R = S.camp?.reprise; if (!R) return null;
+  const seen = new Set(), es = [];
+  ra.services.forEach(sid => { const e = R.services[sid]; if (!e) return; const k = e.sources.map(x => x.fid).join(); if (!seen.has(k)) { seen.add(k); es.push([sid, e]); } });
+  if (!es.length) return null;
+  const multi = es.length > 1, pre = sid => multi ? `[${R.services[sid].service}]\n` : '';
+  const txt = k => es.filter(([, e]) => String(e[k] || '').trim()).map(([sid, e]) => pre(sid) + e[k]).join('\n\n');
+  const ident = {}; es.forEach(([, e]) => Object.entries(e.ident || {}).forEach(([k, v]) => { if (!(k in ident)) ident[k] = v; }));
+  return {annee: R.annee_source, historique: txt('historique'), missions: txt('missions'), public: txt('public'), contexte: txt('contexte_brouillon'), ident,
+    cadre: es.flatMap(([, e]) => e.cadre || []), partenaires: es.flatMap(([, e]) => e.partenaires || []), perspectives: es.flatMap(([, e]) => e.perspectives || []),
+    sources: es.flatMap(([, e]) => e.sources.map(x => x.titre + (x.statut_cartouche ? ` (statut : ${x.statut_cartouche})` : '')))};
+}
+function applyReprise(br, ra) {
+  const r = repriseFor(ra); br.repris = {}; if (!r) return;
+  const s = br.saisie, mark = p => { br.repris[p] = {relu: false}; };
+  if (r.historique) { s.intro.historique = r.historique; mark('intro|historique'); }
+  if (r.missions) { s.missions = r.missions; mark('missions'); }
+  if (r.public) { s.public.texte = r.public; mark('public|texte'); }
+  if (r.cadre.length) { s.intro.cadre = r.cadre.map(c => ({annee: c.annee || '', texte: c.texte || '', apport: c.apport || ''})); mark('intro|cadre'); }
+  if (r.partenaires.length) { s.partenariats.tableau = r.partenaires.map(p => ({partenaire: p.partenaire || '', type: p.type || '', nature: p.nature || '', conv: p.conv || ''})); mark('partenariats|tableau'); }
+  ['adresse', 'telephone', 'mail', 'date_arrete', 'financeurs', 'horaires'].forEach(k => { if (r.ident[k]) { s.ident[k] = r.ident[k]; mark('ident|' + k); } });
+  if (r.perspectives.length) { s.conclusion.suivi = r.perspectives.map(o => ({objectif: o, realisation: '', commentaire: ''})); mark('conclusion|suivi'); }
+  br.repriseInfo = {annee: r.annee, sources: r.sources, contexte: r.contexte || ''};
+}
+function normalizeBr(br) {
+  if (!br) return; br.repris = br.repris || {};
+  if (br.saisie && br.saisie.conclusion && !br.saisie.conclusion.suivi) br.saisie.conclusion.suivi = [];
+}
+const reprisBadge = p => { const r = S.br.repris?.[p]; if (!r) return '';
+  return `<div class="repris ${r.relu ? 'ok' : ''}">Repris du RA ${S.br.repriseInfo?.annee || S.br.annee - 1} – ${r.relu ? 'relu' : 'à relire'} <label><input type="checkbox" data-relu="${p}" ${r.relu ? 'checked' : ''}> Relu et à jour</label></div>`; };
+
+/* ---------- Statuts ---------- */
+function setStatut(br, statut, actor, comment) {
+  addJournal(br, statut, actor, comment);
+  if (S.camp) { const ra = getRA(br.raId); if (ra) { ra.statut = statut; ra.journal = clone(br.journal); } }
+  autosave();
+}
+
+/* ---------- Vérifier ---------- */
+const YEAR_EXEMPT = /(loi|d[ée]cret|arr[êe]t[ée]|ordonnance|circulaire|code|art\.?|article)\b[^.;\n]{0,40}$/i;
+function yearIssues(text, N) {
+  const bad = new Set(); const re = /\b(19|20)\d{2}\b/g; let m;
+  while ((m = re.exec(text))) { const y = +m[0]; if (y >= N - 1 && y <= N + 1) continue; if (YEAR_EXEMPT.test(text.slice(Math.max(0, m.index - 60), m.index))) continue; bad.add(y); }
+  return [...bad];
+}
+function blockEff(br, i) {
+  const b = br.sources.activite[i], o = {};
+  ['jours', 'theorique', 'previsionnel', 'realise', 'facturation', 'file_active'].forEach(k => { if (b[k]) o[k] = b[k].map((_, m) => eff(br, `activite${SEP}${i}${SEP}${k}${SEP}${m}`)); });
+  return o;
+}
+function verify(br) {
+  const out = [], N = br.annee, s = br.saisie;
+  const add = (lvl, sec, msg) => out.push({lvl, sec, msg});
+  const req = [['intro|contexte', 'Introduction', 'Contexte national et local'], ['intro|historique', 'Introduction', 'Historique du service'], ['ident|adresse', 'I.1', 'Adresse'],
+    ['missions', 'I.2', 'Missions et objectifs'], ['public|texte', 'I.3', 'Public cible et modalités d\'accès'], ['activites|texte', 'II.1', 'Activités et prestations réalisées'],
+    ['bilan|commentaire', 'III.1', "Commentaire d'analyse"], ['qualitatif', 'III.2', 'Bilan qualitatif'], ['conclusion|bilan', 'IV.1', "Bilan général de l'année"]];
+  req.forEach(([p, sec, l]) => { if (!String(getP(s, p) || '').trim()) add('bloquant', sec, `« ${l} » est vide.`); });
+  if (!(s.rh.tableau || []).some(r => String(r.fonction || '').trim())) add('bloquant', 'II.2', 'Le tableau des ETP par fonction est vide.');
+  if (!(s.conclusion.perspectives || []).some(r => String(r.objectif || '').trim())) add('bloquant', 'IV.2', 'Aucune perspective saisie.');
+  const fei = br.sources.fei; if (fei?.imported && num(eff(br, 'fei|n')) > 0 && !s.qualite.fei_analyse.trim()) add('bloquant', 'II.4', 'Analyse des événements indésirables vide.');
+  if (['bilan|mvt'].some(p => Object.values(getP(s, p)).some(v => v === ''))) add('bloquant', 'III.1', 'Tableau des mouvements des personnes accompagnées incomplet.');
+  Object.entries(LIMITS).forEach(([p, max]) => { const v = String(getP(s, p) || ''); if (v.length > max) add('bloquant', p, `Texte trop long (${v.length} / ${max} caractères) : ${p.replace(SEP, ' › ')}.`); });
+  if (br.sources.registre) Object.entries(br.sources.registre.values).forEach(([k]) => { const c = String(eff(br, `registre${SEP}values${SEP}${k}${SEP}commentaire`) || ''); if (c.length > 300) add('bloquant', 'II.4', `Commentaire 2002-2 trop long (${k}).`); });
+
+  // années
+  const texts = [['intro|contexte', 'Introduction'], ['missions', 'I.2'], ['public|texte', 'I.3'], ['activites|texte', 'II.1'], ['rh|formations', 'II.2'], ['partenariats|texte', 'II.3'],
+    ['qualite|fei_analyse', 'II.4'], ['bilan|commentaire', 'III.1'], ['qualitatif', 'III.2'], ['conclusion|bilan', 'IV.1']];
+  texts.forEach(([p, sec]) => { const y = yearIssues(String(getP(s, p) || ''), N); if (y.length) add('alerte', sec, `Année(s) incohérente(s) avec un RA ${N} : ${y.join(', ')}.`); });
+  ['activites|tableau', 'conclusion|perspectives', 'qualite|cvs'].forEach(p => { const y = yearIssues((getP(s, p) || []).map(r => Object.values(r).join(' ')).join(' '), N); if (y.length) add('alerte', p.split(SEP)[0], `Année(s) incohérente(s) dans le tableau : ${y.join(', ')}.`); });
+
+  // mouvements
+  const mv = (o, sec, lab) => { const [a, e, so, f] = ['debut', 'entrees', 'sorties', 'fin'].map(k => num(o[k])); if ([a, e, so, f].every(x => x != null) && a + e - so !== f) add('alerte', sec, `${lab} : ${a} + ${e} − ${so} = ${a + e - so}, mais ${f} présents au 31/12.`); };
+  mv(s.rh.mvt, 'II.2', 'Mouvements du personnel'); mv(s.bilan.mvt, 'III.1', 'Mouvements des personnes accompagnées');
+  // ETP
+  const bud = sum(s.rh.tableau.map(r => r.etp_bud)), reel = sum(s.rh.tableau.map(r => r.etp_reel));
+  if (bud > 0 && Math.abs(reel - bud) / bud > 0.10) add('alerte', 'II.2', `ETP réels (${fmt(reel, 2)}) éloignés de plus de 10 % des ETP budgétés (${fmt(bud, 2)}).`);
+  const bp = num(s.ident.etp_bp); if (bp != null && bud > 0 && Math.abs(bp - bud) > 0.01) add('alerte', 'I.1 / II.2', `ETP budgétés au BP${N} (${fmt(bp, 2)}) ≠ total du tableau des ETP (${fmt(bud, 2)}).`);
+  // activité
+  if (!br.sources.activiteImportee) add('alerte', 'III.1', `Classeur d'activité ${N} non importé par le Siège.`);
+  else if (!br.sources.activite.length) add('alerte', 'III.1', `Aucun onglet du suivi d'activité ${N} rattaché à ce RA.`);
+  const ouv = parseLooseDate(s.ident.date_ouverture);
+  br.sources.activite.forEach((b, i) => {
+    const e = blockEff(br, i), lab = b.libelle || b.sheet;
+    if (b.missing?.length) add('alerte', 'III.1', `${lab} : mois manquants dans le classeur (${b.missing.map(m => MOIS[m]).join(', ')}).`);
+    if (!e.theorique || !e.realise) { add('alerte', 'III.1', `${lab} : ligne « volume théorique » ou « réalisé » introuvable.`); return; }
+    for (let m = 0; m < 12; m++) {
+      const t = num(e.theorique[m]) || 0, r = num(e.realise[m]) || 0;
+      if (t === 0 && r > 0) add('alerte', 'III.1', `${lab}, ${MOIS[m]} : activité sur un mois sans activité théorique.`);
+      else if (t > 0 && r === 0 && e.realise[m] !== null) add('alerte', 'III.1', `${lab}, ${MOIS[m]} : aucune activité réalisée.`);
+      else if (t > 0 && r / t > 1.2) add('alerte', 'III.1', `${lab}, ${MOIS[m]} : taux d'occupation de ${pct(r / t)} (> 120 %).`);
+      if (ouv && ouv.getFullYear() === N && m < ouv.getMonth() && r > 0) add('alerte', 'III.1', `${lab}, ${MOIS[m]} : activité réalisée avant la date d'ouverture (${s.ident.date_ouverture}).`);
+    }
+  });
+  // 2002-2
+  if (br.sources.registre) br.sources.registre.outils.forEach(o => {
+    const st = outilStatut(o, regEff(br, o.k), br.ra, N);
+    if (['À réviser', 'À renouveler', 'Absent'].includes(st.s)) add('alerte', 'II.4', `Outil 2002-2 « ${o.label} » : ${st.s}${st.why ? ' (' + st.why + ')' : ''}.`);
+  });
+  // écarts
+  const ec = Object.values(br.ecarts);
+  if (ec.length) add('info', 'Écarts', `${ec.length} donnée(s) pré-remplie(s) modifiée(s).`);
+  ec.filter(e => !String(e.motif || '').trim()).forEach(e => add('bloquant', 'Écarts', `Modification sans motif : ${e.label || ''}.`));
+  Object.entries(br.repris || {}).filter(([, r]) => !r.relu).forEach(([p]) => add('alerte', 'Reprise N-1', `Champ repris du RA ${br.repriseInfo?.annee || N - 1} non relu : ${REPRIS_LABELS[p] || p}.`));
+  // pièces
+  if (!br.sources.organigramme) add('alerte', 'II.2', 'Organigramme absent : aucun organigramme rattaché par le Siège.');
+  if (!fei?.imported) add('alerte', 'II.4', 'Export FEI manquant : aucune donnée Ageval chargée par le Siège.');
+  else if (fei.n === 0) add('alerte', 'II.4', `0 FEI en ${N} : vraie absence d'événement ou service qui ne déclare pas ?`);
+  if (!br.logos?.mlezi) add('alerte', 'Charte', 'Logo combiné Mlezi Maore + GROUPE SOS non chargé dans la campagne.');
+  return out;
+}
+const regEff = (br, k) => { const v = {}; const src = br.sources.registre.values[k] || {}; Object.keys(src).forEach(f => v[f] = eff(br, `registre${SEP}values${SEP}${k}${SEP}${f}`)); return v; };
+
+/* ---------- Rendu de la saisie ---------- */
+function tx(p, label, o = {}) {
+  const v = getP(S.br.saisie, p) || '', max = LIMITS[p], ro = o.ro ? 'readonly' : '';
+  return `<div class="fld"><label class="${o.req ? 'req' : ''}">${esc(label)}</label>${o.help ? `<div class="muted">${o.help}</div>` : ''}${reprisBadge(p)}
+    <textarea data-s="${p}" rows="${o.rows || 6}" ${ro}>${esc(v)}</textarea>${max ? `<div class="cnt ${v.length > max ? 'over' : ''}" data-cnt="${p}">${v.length} / ${max}</div>` : ''}</div>`;
+}
+function inp(p, label, o = {}) {
+  return `<div class="fld"><label class="${o.req ? 'req' : ''}">${esc(label)}</label>${reprisBadge(p)}<input type="text" data-s="${p}" value="${esc(getP(S.br.saisie, p) ?? '')}" placeholder="${esc(o.ph || '')}"></div>`;
+}
+function pfv(p, o = {}) { // champ pré-rempli compact
+  const br = S.br, src = getP(br.sources, p), e = br.ecarts[p], v = e ? e.value : src;
+  const tip = e ? `Valeur source : ${src ?? '—'} | Valeur saisie : ${v ?? '—'} | Motif : ${e.motif} | ${frDateTime(e.date)}` : `Source : ${o.src || ''}`;
+  const attrs = `data-p="${esc(p)}" data-label="${esc(o.label || p)}" data-sec="${esc(o.sec || '')}" ${o.num ? 'data-num="1"' : ''} title="${esc(tip)}" class="pref ${e ? 'mod' : ''}"`;
+  const field = o.options ? `<select ${attrs}>${o.options.map(x => `<option ${String(x) === String(v ?? '') ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>`
+    : `<input type="text" ${attrs} value="${esc(v == null ? '' : (o.num ? String(v).replace('.', ',') : v))}" ${o.w ? `style="width:${o.w}px"` : ''}>`;
+  return field + (e ? `<span class="mark" title="${esc(tip)}"> ✎</span>` : '');
+}
+const pf = (p, label, o = {}) => `<div class="fld"><label>${esc(label)}<span class="src">${esc(o.src || '')}</span></label>${pfv(p, {...o, label})}</div>`;
+function tbl(p) {
+  const def = TABLES[p], rows = getP(S.br.saisie, p) || [];
+  return `${reprisBadge(p)}<table class="t t-edit"><thead><tr>${def.map(c => `<th ${c[3] ? `style="width:${c[3]}px"` : ''}>${esc(c[1])}</th>`).join('')}<th style="width:30px"></th></tr></thead><tbody>
+    ${rows.map((r, i) => `<tr>${def.map(([k, , t]) => `<td>${Array.isArray(t) ? `<select data-tc="${p}" data-i="${i}" data-k="${k}">${t.map(x => `<option ${x === r[k] ? 'selected' : ''}>${x}</option>`).join('')}</select>`
+      : `<input type="text" data-tc="${p}" data-i="${i}" data-k="${k}" value="${esc(r[k] ?? '')}">`}</td>`).join('')}<td><button class="btn sm ghost" data-del="${p}" data-i="${i}" title="Supprimer la ligne">✕</button></td></tr>`).join('')}
+    </tbody></table><button class="btn sm sec" data-add="${p}">+ Ajouter une ligne</button>`;
+}
+function mvtFields(p, lab) {
+  return `<h3>${esc(lab)}</h3><table class="t t-edit"><thead><tr><th>Présents au 01/01/${S.br.annee}</th><th>Entrées</th><th>Sorties</th><th>Présents au 31/12/${S.br.annee}</th></tr></thead>
+    <tbody><tr>${['debut', 'entrees', 'sorties', 'fin'].map(k => `<td><input type="text" data-s="${p}${SEP}${k}" value="${esc(getP(S.br.saisie, p + SEP + k) ?? '')}"></td>`).join('')}</tr></tbody></table>
+    <div class="muted">Effectifs à date uniquement (nombres), jamais de liste nominative.</div>`;
+}
+const SRC_ACT = () => `Suivi d'activité ${S.br.annee}`;
+
+function activityEditor() {
+  const br = S.br, N = br.annee, bl = br.sources.activite;
+  if (!bl.length) return `<div class="warnbox">Aucune donnée du suivi d'activité ${N} n'est rattachée à ce RA. Le Siège doit importer le classeur et rattacher l'onglet du dispositif.</div>`;
+  return bl.map((b, i) => {
+    const e = blockEff(br, i); const rows = ['theorique', 'previsionnel', 'realise', 'file_active'].filter(k => b[k]);
+    const prm = b.params || {};
+    return `<div class="card"><h3>${esc(b.libelle)} <span class="chip">${esc(b.code)}</span> <span class="muted">onglet « ${esc(b.sheet)} »</span></h3>
+      <div class="muted">${prm.places != null ? `${esc(prm.places_label || 'Places')} : ${fmt(num(prm.places), 1)} · ` : ''}${prm.prix != null ? `Prix journalier : ${fmt(num(prm.prix), 2)} € · ` : ''}${prm.jours_cible != null ? `Jours d'ouverture cible : ${fmt(num(prm.jours_cible))} · ` : ''}${prm.financeur ? esc(prm.financeur) : ''}</div>
+      <div style="overflow:auto"><table class="t t-edit small"><thead><tr><th></th>${MOIS.map(m => `<th class="n">${m}</th>`).join('')}<th class="n">Total</th></tr></thead><tbody>
+      ${rows.map(k => `<tr><td><b>${LINE_LABELS[k]}</b></td>${b[k].map((_, m) => `<td>${pfv(`activite${SEP}${i}${SEP}${k}${SEP}${m}`, {num: true, w: 62, src: SRC_ACT(), sec: 'III.1', label: `${b.libelle} – ${LINE_LABELS[k]} – ${MOIS[m]}`})}</td>`).join('')}<td class="n"><b>${fmt(sum(e[k]))}</b></td></tr>`).join('')}
+      ${e.theorique && e.realise ? `<tr><td><b>Taux d'occupation</b><div class="muted">réalisé / théorique</div></td>${e.realise.map((r, m) => `<td class="n">${num(e.theorique[m]) ? pct(num(r) / num(e.theorique[m])) : '—'}</td>`).join('')}<td class="n"><b>${sum(e.theorique) ? pct(sum(e.realise) / sum(e.theorique)) : '—'}</b></td></tr>` : ''}
+      </tbody></table></div></div>`;
+  }).join('');
+}
+function feiEditor() {
+  const br = S.br, f = br.sources.fei, N = br.annee;
+  if (!f?.imported) return `<div class="warnbox">Le Siège n'a pas chargé l'export FEI réduit d'Ageval.</div>`;
+  const P = k => `fei${SEP}${k}`;
+  const kv = (obj, base, lab) => `<table class="t t-edit small"><thead><tr><th>${lab}</th><th class="n" style="width:110px">Nb</th></tr></thead><tbody>${Object.keys(obj).map(k => `<tr><td>${esc(k)}</td><td>${pfv(P(base + SEP + k), {num: true, w: 80, src: 'Ageval', sec: 'II.4', label: `FEI – ${lab} – ${k}`})}</td></tr>`).join('')}</tbody></table>`;
+  return `<div class="grid">
+    ${pf(P('n'), `FEI déclarées en ${N}`, {num: true, src: 'Ageval', sec: 'II.4'})}
+    ${f.nN1 != null ? pf(P('nN1'), `FEI déclarées en ${N - 1}`, {num: true, src: 'Ageval', sec: 'II.4'}) : ''}
+    ${pf(P('delai'), 'Délai moyen de traitement (jours)', {num: true, src: 'Ageval', sec: 'II.4'})}
+    ${pf(P('declN'), 'Déclarations obligatoires', {num: true, src: 'Ageval', sec: 'II.4'})}</div>
+    ${f.n >= 3 ? `<div class="grid">${kv(f.cats, 'cats', 'Catégorie')}${kv(f.grav, 'grav', 'Gravité')}${kv(f.avancement, 'avancement', 'Avancement')}</div>
+    <div class="muted">Une FEI peut relever de plusieurs catégories : le total des catégories peut dépasser le nombre de FEI.</div>` : `<div class="muted">Moins de 3 FEI : seul le total figure dans le rapport, sans ventilation.</div>`}
+    ${Object.keys(f.autorites).length ? `<div class="muted">Autorités destinataires : ${Object.entries(f.autorites).map(([k, v]) => `${esc(k)} (${v})`).join(', ')}</div>` : ''}
+    ${tx('qualite|fei_analyse', 'Analyse des événements indésirables', {req: num(eff(br, 'fei|n')) > 0, rows: 4})}`;
+}
+function registreEditor() {
+  const br = S.br, R = br.sources.registre, N = br.annee;
+  return `<div class="muted">CVS obligatoire pour ce service : <b>${R.cvs_obligatoire ? 'oui' : 'non'}</b> (paramètre fixé par le Siège). Le statut est calculé, jamais saisi.</div>
+  <table class="t t-edit small"><thead><tr><th>Outil</th><th>Situation au 31/12/${N}</th><th style="width:110px">Statut</th><th>Commentaire (300 car.)</th></tr></thead><tbody>
+  ${R.outils.map(o => { const base = `registre${SEP}values${SEP}${o.k}`; const st = outilStatut(o, regEff(br, o.k), br.ra, N);
+    return `<tr><td><b>${esc(o.label)}</b><div class="muted">${esc(o.base)}</div></td>
+      <td>${OUTIL_FIELDS[o.type].map(([f, l, opts]) => `<div class="small">${esc(l.replace(' en N', ' en ' + N))} ${pfv(base + SEP + f, {options: opts, src: 'Registre 2002-2', sec: 'II.4', label: `${o.label} – ${l}`, w: 120})}</div>`).join('')}</td>
+      <td><span class="badge ${st.s === 'À jour' ? 'b-ctrl' : st.s === 'Sans objet' ? 'b-lancer' : 'b-corr'}">${st.s}</span>${st.why ? `<div class="muted">${esc(st.why)}</div>` : ''}</td>
+      <td>${pfv(base + SEP + 'commentaire', {src: 'Registre 2002-2', sec: 'II.4', label: `${o.label} – commentaire`})}</td></tr>`; }).join('')}
+  </tbody></table>`;
+}
+function saisieSections() {
+  const br = S.br, N = br.annee, I = br.sources.identite, mod = moduleFor(br.ra);
+  const P = k => `identite${SEP}${k}`, src = 'Référentiel';
+  return [
+    ['intro', 'Introduction', null, `${br.repriseInfo?.contexte ? `<details class="card"><summary>Contexte rédigé dans le RA ${br.repriseInfo.annee} (pour mémoire)</summary><div class="small" style="white-space:pre-wrap">${esc(br.repriseInfo.contexte)}</div>${br.saisie.intro.contexte.trim() ? '' : '<button class="btn sm sec" data-insctx="1">Utiliser comme point de départ</button>'}</details>` : ''}${tx('intro|contexte', 'Contexte national et local', {req: true})}${tx('intro|historique', 'Historique du service', {req: true, help: 'Les années citées ici ne sont pas contrôlées.'})}
+      <h3>Cadre légal <span class="muted">(facultatif – années non contrôlées)</span></h3>${tbl('intro|cadre')}`],
+    ['i', 'I. Présentation du service', null, ''],
+    ['i1', '1. Informations principales', 1, `<div class="grid">${['service', 'secteur', 'direction', 'directeur', 'chef_de_service', 'esms', 'finess', 'sites', 'communes'].map(k => pf(P(k), {service: 'Service', secteur: 'Secteur', direction: 'Direction', directeur: 'Directeur', chef_de_service: 'Chef de service', esms: 'ESMS', finess: 'FINESS', sites: 'Sites', communes: 'Communes'}[k], {src, sec: 'I.1'})).join('')}
+      ${pf(P('capacite'), 'Capacité', {num: true, src: SRC_ACT(), sec: 'I.1'})}</div>
+      <div class="grid">${inp('ident|adresse', 'Adresse', {req: true})}${inp('ident|telephone', 'Téléphone')}${inp('ident|mail', 'Mail')}${inp('ident|date_arrete', "Date de l'arrêté d'autorisation", {ph: 'JJ/MM/AAAA'})}
+      ${inp('ident|date_ouverture', "Date d'ouverture", {ph: 'JJ/MM/AAAA'})}${inp('ident|nb_beneficiaires', 'Nombre de bénéficiaires')}${inp('ident|etp_bp', `ETP budgétés au BP${N}`)}${inp('ident|financeurs', 'Financeurs')}${inp('ident|horaires', "Jours et horaires d'ouverture")}</div>`],
+    ['i2', '2. Missions et objectifs', 1, tx('missions', 'Missions et objectifs', {req: true})],
+    ['i3', "3. Public cible et modalités d'accès", 1, `${tx('public|texte', "Public cible et modalités d'accès", {req: true})}
+      <h3>Répartition par sexe <span class="muted">(facultatif)</span></h3><div class="grid">${inp('public|femmes', 'Femmes / filles')}${inp('public|hommes', 'Hommes / garçons')}</div>
+      <h3>Répartition par tranche d'âge <span class="muted">(facultatif)</span></h3>${tbl('public|ages')}`],
+    ['ii', 'II. Fonctionnement du service', null, ''],
+    ['ii1', '1. Activités et prestations réalisées', 1, `${tx('activites|texte', 'Activités et prestations réalisées', {req: true})}<h3>Tableau des activités <span class="muted">(facultatif)</span></h3>${tbl('activites|tableau')}`],
+    ['ii2', '2. Organisation du service – Ressources humaines', 1, `${br.sources.organigramme ? `<img src="${br.sources.organigramme.data}" style="max-width:100%;max-height:420px;border:1px solid var(--bord)"><div class="muted">Organigramme du service au ${frDate(br.sources.organigramme.date)} (source : intranet)</div>` : `<div class="warnbox">Aucun organigramme rattaché par le Siège.</div>`}
+      <h3 class="req">ETP par fonction</h3>${tbl('rh|tableau')}<div class="muted">Total : ${fmt(sum(br.saisie.rh.tableau.map(r => r.etp_bud)), 2)} ETP budgétés · ${fmt(sum(br.saisie.rh.tableau.map(r => r.etp_reel)), 2)} ETP réels</div>
+      ${mvtFields('rh|mvt', 'Mouvements du personnel')}${tx('rh|formations', 'Formations', {rows: 4})}`],
+    ['ii3', '3. Partenariats et communication', 1, `<div class="muted">Sous-section facultative : supprimée du rapport si elle reste vide.</div>${tbl('partenariats|tableau')}${tx('partenariats|texte', 'Partenariats et communication', {rows: 4})}`],
+    ['ii4', '4. Démarche qualité', 1, `${br.sources.registre ? `<h3>Outils de la loi 2002-2</h3>${registreEditor()}` : ''}
+      <h3>CVS et groupes d'expression <span class="muted">(facultatif)</span></h3>${tbl('qualite|cvs')}
+      <h3>Bilan des événements indésirables</h3>${feiEditor()}`],
+    ['iii', `III. Bilan de l'activité ${N}`, null, ''],
+    ['iii1', '1. Bilan quantitatif', 1, `${activityEditor()}${mvtFields('bilan|mvt', 'Mouvements des personnes accompagnées')}
+      ${tx('bilan|commentaire', "Commentaire d'analyse", {req: true, rows: 5})}
+      ${mod ? `<h3>Module complémentaire : ${esc(mod[1])} <span class="muted">(facultatif)</span></h3>${!br.saisie.bilan.complementaires.length ? `<button class="btn sm ghost" data-modfill="1">Insérer les indicateurs types</button> ` : ''}${tbl('bilan|complementaires')}` : `<h3>Indicateurs complémentaires <span class="muted">(facultatif)</span></h3>${tbl('bilan|complementaires')}`}`],
+    ['iii2', '2. Bilan qualitatif', 1, tx('qualitatif', 'Bilan qualitatif', {req: true, rows: 10})],
+    ['iv', `IV. Conclusion et perspectives ${N + 1}`, null, ''],
+    ['iv1', `1. Bilan général de l'année ${N}`, 1, `${tx('conclusion|bilan', `Bilan général de l'année ${N}`, {req: true})}
+      <h3>Suivi des perspectives fixées dans le RA ${N - 1} <span class="muted">(facultatif – imprimé seulement si une réalisation est renseignée)</span></h3>${tbl('conclusion|suivi')}`],
+    ['iv2', `2. Perspectives pour ${N + 1}`, 1, `<h3 class="req">Objectifs</h3>${tbl('conclusion|perspectives')}`],
+    ['ann', 'Annexes', null, `<div class="muted">Images légendées, 6 au maximum (facultatif).</div>
+      ${br.saisie.annexes.map((a, i) => `<div class="card row"><img src="${a.data}" style="height:80px"><div style="flex:1"><input type="text" data-tc="annexes" data-i="${i}" data-k="legende" value="${esc(a.legende)}" placeholder="Légende"></div><button class="btn sm ghost" data-del="annexes" data-i="${i}">✕</button></div>`).join('')}
+      ${br.saisie.annexes.length < 6 ? `<label class="btn sm sec">+ Ajouter une image<input type="file" accept="image/*" data-annex="1" hidden></label>` : ''}`]
+  ];
+}
+function completude() {
+  const iss = verify(S.br); const bloq = iss.filter(i => i.lvl === 'bloquant').length;
+  const total = 13; return {pct: Math.max(0, Math.round(100 * (total - Math.min(total, bloq)) / total)), bloq, iss};
+}
+
+/* ==========================================================================
+   Rendu du rapport A4 (Paged.js) et rapport de contrôle
+   ========================================================================== */
+const cssStr = s => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ') + '"';
+const para = t => String(t || '').trim().split(/\n{2,}/).map(p => `<p>${esc(p).replace(/\n/g, '<br>')}</p>`).join('');
+const hasRows = (rows, keys) => (rows || []).filter(r => keys.some(k => String(r[k] ?? '').trim()));
+
+function chartSVG(theo, real, title) {
+  const W = 640, H = 230, L = 46, R = 70, T = 30, B = 26, iw = W - L - R, ih = H - T - B;
+  const vals = [...theo, ...real].map(v => num(v) || 0); const max = Math.max(1, ...vals);
+  const step = Math.pow(10, Math.floor(Math.log10(max))); const top = Math.ceil(max / step) * step;
+  const y = v => T + ih - (v / top) * ih, bw = iw / 12;
+  const ticks = [0, .25, .5, .75, 1].map(f => top * f);
+  let s = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="Arial" font-size="10" role="img" aria-label="${esc(title)}">`;
+  s += `<g><rect x="${L}" y="6" width="10" height="10" rx="2" fill="#39A3BB"/><text x="${L + 14}" y="15" fill="#262626">Réalisé</text>
+        <line x1="${L + 70}" y1="11" x2="${L + 90}" y2="11" stroke="#EB6F4B" stroke-width="2"/><circle cx="${L + 80}" cy="11" r="4" fill="#EB6F4B" stroke="#fff" stroke-width="2"/><text x="${L + 96}" y="15" fill="#262626">Théorique</text></g>`;
+  ticks.forEach(t => { s += `<line x1="${L}" x2="${L + iw}" y1="${y(t)}" y2="${y(t)}" stroke="#e3e3e3" stroke-width="1"/><text x="${L - 6}" y="${y(t) + 3}" text-anchor="end" fill="#6D6E71">${fmt(t)}</text>`; });
+  real.forEach((v, m) => { const r = num(v) || 0; if (r <= 0) return; const x = L + m * bw + bw * .2, w = bw * .6, yy = y(r), h = T + ih - yy, rr = Math.min(4, h, w / 2);
+    s += `<path d="M${x},${T + ih} V${yy + rr} Q${x},${yy} ${x + rr},${yy} H${x + w - rr} Q${x + w},${yy} ${x + w},${yy + rr} V${T + ih} Z" fill="#39A3BB"/>`; });
+  const pts = theo.map((v, m) => [L + m * bw + bw / 2, y(num(v) || 0)]);
+  s += `<polyline points="${pts.map(p => p.join(',')).join(' ')}" fill="none" stroke="#EB6F4B" stroke-width="2"/>`;
+  pts.forEach(p => { s += `<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="#EB6F4B" stroke="#fff" stroke-width="2"/>`; });
+  const last = pts[11]; s += `<text x="${last[0] + 8}" y="${last[1] + 3}" fill="#262626">Théorique</text>`;
+  s += `<line x1="${L}" x2="${L + iw}" y1="${T + ih}" y2="${T + ih}" stroke="#6D6E71"/>`;
+  MOIS.forEach((m, i) => { s += `<text x="${L + i * bw + bw / 2}" y="${H - 8}" text-anchor="middle" fill="#6D6E71">${m}</text>`; });
+  return s + '</svg>';
+}
+
+function reportBody(br) {
+  const N = br.annee, s = br.saisie, I = k => eff(br, `identite${SEP}${k}`), svc = br.ra.libelle;
+  const iss = verify(br), bloq = iss.some(i => i.lvl === 'bloquant');
+  const secs = []; // {id, lvl, title, html}
+  const add = (id, lvl, title, html) => secs.push({id, lvl, title, html});
+  const tbl = (head, rows, cls = '') => `<table class="rt ${cls}"><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  const mvt = (o) => tbl([`Présents au 01/01/${N}`, 'Entrées', 'Sorties', `Présents au 31/12/${N}`], [['debut', 'entrees', 'sorties', 'fin'].map(k => esc(o[k]))], 'num');
+
+  // Introduction
+  const cadre = hasRows(s.intro.cadre, ['annee', 'texte', 'apport']);
+  add('intro', 1, 'Introduction', '');
+  add('intro-ctx', 2, 'Contexte national et local', para(s.intro.contexte));
+  add('intro-hist', 2, 'Historique du service', para(s.intro.historique));
+  if (cadre.length) add('intro-cadre', 2, 'Cadre légal', tbl(['Année', 'Texte de référence', 'Apport clé'], cadre.map(r => [esc(r.annee), esc(r.texte), esc(r.apport)])));
+
+  // I
+  add('i', 1, 'I. Présentation du service', '');
+  const idRows = [['Service', I('service')], ['Secteur', I('secteur')], ['Direction', I('direction')], ['Directeur', I('directeur')], ['Chef de service', I('chef_de_service')],
+    ['ESMS', I('esms')], ['FINESS', I('finess')], ['Adresse', s.ident.adresse], ['Téléphone', s.ident.telephone], ['Mail', s.ident.mail], ['Sites', I('sites')], ['Communes', I('communes')],
+    ["Date de l'arrêté d'autorisation", s.ident.date_arrete], ["Date d'ouverture", s.ident.date_ouverture], ['Capacité', I('capacite') != null ? fmt(num(I('capacite')), 1) : ''],
+    ['Nombre de bénéficiaires', s.ident.nb_beneficiaires], [`ETP budgétés au BP${N}`, s.ident.etp_bp], ['Financeurs', s.ident.financeurs], ["Jours et horaires d'ouverture", s.ident.horaires]]
+    .filter(r => String(r[1] ?? '').trim());
+  add('i1', 2, '1. Informations principales', `<table class="rt ident"><tbody>${idRows.map(r => `<tr><th>${r[0]}</th><td>${esc(r[1])}</td></tr>`).join('')}</tbody></table>`);
+  add('i2', 2, '2. Missions et objectifs', para(s.missions));
+  const ages = hasRows(s.public.ages, ['tranche', 'nb']);
+  const rep = (String(s.public.femmes).trim() || String(s.public.hommes).trim() || ages.length) ? `<div class="two">
+      ${String(s.public.femmes).trim() || String(s.public.hommes).trim() ? tbl(['Répartition par sexe', 'Nb'], [['Femmes / filles', esc(s.public.femmes)], ['Hommes / garçons', esc(s.public.hommes)]]) : '<div></div>'}
+      ${ages.length ? tbl(["Répartition par tranche d'âge", 'Nb'], ages.map(r => [esc(r.tranche), esc(r.nb)])) : ''}</div>` : '';
+  add('i3', 2, "3. Public cible et modalités d'accès", para(s.public.texte) + rep);
+
+  // II
+  add('ii', 1, 'II. Fonctionnement du service', '');
+  const act = hasRows(s.activites.tableau, ['activite', 'participants', 'objectifs']);
+  add('ii1', 2, '1. Activités et prestations réalisées', para(s.activites.texte) + (act.length ? tbl(['Activité', 'Participants', 'Objectifs'], act.map(r => [esc(r.activite), esc(r.participants), esc(r.objectifs)])) : ''));
+  const org = br.sources.organigramme;
+  const rh = hasRows(s.rh.tableau, ['fonction']);
+  const mvtRH = Object.values(s.rh.mvt).some(v => String(v).trim());
+  add('ii2', 2, '2. Organisation du service – Ressources humaines',
+    (org ? `<figure class="orga"><img src="${org.data}"><figcaption>Organigramme du service au ${frDate(org.date)}</figcaption></figure>` : `<p class="note">Organigramme non transmis.</p>`) +
+    (rh.length ? tbl(['Fonction', 'ETP budgétés', 'ETP réels'], [...rh.map(r => [esc(r.fonction), fmt(num(r.etp_bud), 2), fmt(num(r.etp_reel), 2)]), ['<b>Total</b>', `<b>${fmt(sum(rh.map(r => r.etp_bud)), 2)}</b>`, `<b>${fmt(sum(rh.map(r => r.etp_reel)), 2)}</b>`]], 'etp') : '') +
+    (mvtRH ? '<h3>Mouvements du personnel</h3>' + mvt(s.rh.mvt) : '') + (s.rh.formations.trim() ? '<h3>Formations</h3>' + para(s.rh.formations) : ''));
+  const part = hasRows(s.partenariats.tableau, ['partenaire', 'nature']);
+  if (part.length || s.partenariats.texte.trim()) add('ii3', 2, '3. Partenariats et communication',
+    (part.length ? tbl(['Partenaire', 'Type', 'Nature des actions', 'Conventionné'], part.map(r => [esc(r.partenaire), esc(r.type), esc(r.nature), esc(r.conv)])) : '') + para(s.partenariats.texte));
+  // II.4
+  let q = '';
+  if (br.sources.registre) {
+    const R = br.sources.registre;
+    q += `<h3>Outils de la loi 2002-2</h3>` + tbl(['Outil', `Situation au 31/12/${N}`, 'Statut', 'Commentaire'], R.outils.map(o => { const v = regEff(br, o.k), st = outilStatut(o, v, br.ra, N);
+      return [`${esc(o.label)}<div class="base">${esc(o.base)}</div>`, esc(outilSituation(o, v)), `<span class="st st-${st.s === 'À jour' ? 'ok' : st.s === 'Sans objet' ? 'so' : 'ko'}">${st.s}</span>`, esc(v.commentaire || '')]; }), 'reg');
+  }
+  const cvs = hasRows(s.qualite.cvs, ['date', 'participants', 'sujets']);
+  if (cvs.length) q += `<h3>CVS et groupes d'expression</h3>` + tbl(['Date', 'Participants', 'Sujets traités'], cvs.map(r => [esc(r.date), esc(r.participants), esc(r.sujets)]));
+  q += `<h3>Bilan des événements indésirables</h3>`;
+  const f = br.sources.fei;
+  if (!f?.imported) q += `<p class="note">Données Ageval non disponibles.</p>`;
+  else {
+    const F = k => eff(br, `fei${SEP}${k}`), n = num(F('n')) || 0;
+    if (n === 0) q += `<p>Aucun événement indésirable déclaré dans Ageval en ${N}.</p>`;
+    else {
+      q += `<p><b>${fmt(n)}</b> fiche(s) d'événement indésirable déclarée(s) en ${N}${f.nN1 != null ? ` (${fmt(num(F('nN1')))} en ${N - 1})` : ''}.</p>`;
+      if (n >= 3) {
+        const kv = (base, lab) => { const o = f[base]; const rows = Object.keys(o).map(k => [esc(k), fmt(num(F(base + SEP + k)))]).filter(r => r[1] !== '—' && r[1] !== '0' || base === 'grav'); return tbl([lab, 'Nb'], rows); };
+        q += `<div class="two">${kv('cats', 'Catégorie')}${kv('grav', 'Gravité')}</div><p class="note">Une FEI peut relever de plusieurs catégories : le total des catégories peut dépasser le nombre de FEI.</p>`;
+        q += tbl(['Avancement', 'Nb'], Object.keys(f.avancement).map(k => [k, fmt(num(F('avancement' + SEP + k)))]));
+        const dec = num(F('declN')) || 0;
+        q += `<p>Délai moyen de traitement des FEI terminées : <b>${F('delai') != null ? fmt(num(F('delai'))) + ' jours' : 'non calculable'}</b>. Déclarations obligatoires : <b>${fmt(dec)}</b>${dec && Object.keys(f.autorites).length ? ' (' + Object.entries(f.autorites).map(([k, v]) => `${esc(k)} : ${v}`).join(', ') + ')' : ''}.</p>`;
+      }
+      q += para(s.qualite.fei_analyse);
+    }
+  }
+  add('ii4', 2, '4. Démarche qualité', q);
+
+  // III
+  add('iii', 1, `III. Bilan de l'activité ${N}`, '');
+  let a = '';
+  const bl = br.sources.activite;
+  if (!bl.length) a += `<p class="note">Aucune donnée du suivi d'activité ${N} rattachée à ce service.</p>`;
+  const tot = {theorique: 0, previsionnel: 0, realise: 0, hasPrev: false};
+  bl.forEach((b, i) => {
+    const e = blockEff(br, i), p = b.params || {};
+    if (!e.theorique || !e.realise) return;
+    const T = sum(e.theorique), Rr = sum(e.realise), Pv = e.previsionnel ? sum(e.previsionnel) : null;
+    tot.theorique += T; tot.realise += Rr; if (Pv != null) { tot.previsionnel += Pv; tot.hasPrev = true; }
+    if (bl.length > 1) a += `<h3>${esc(b.libelle)}${b.code ? ` (${esc(b.code)})` : ''}</h3>`;
+    a += tbl(['Indicateur', 'Valeur'], [
+      ...(p.places != null ? [[esc(p.places_label || 'Nombre de places'), fmt(num(p.places), 1)]] : []),
+      ...(p.prix != null ? [['Prix journalier', fmt(num(p.prix), 2) + ' €']] : []),
+      ...(e.jours ? [["Jours d'ouverture", fmt(sum(e.jours))]] : []),
+      ['Volume théorique', fmt(T)], ...(Pv != null ? [['Volume prévisionnel', fmt(Pv)]] : []), ['Réalisé', fmt(Rr)],
+      ['<b>Taux d\'occupation (réalisé / théorique)</b>', `<b>${T ? pct(Rr / T) : '—'}</b>`],
+      ...(Pv ? [['Écart réalisé / prévisionnel', `${fmt(Rr - Pv)} (${pct((Rr - Pv) / Pv)})`]] : []),
+      ...(e.facturation ? [['Montant de la facturation', fmt(sum(e.facturation)) + ' €']] : [])], 'synth');
+    const rows = [['Théorique', e.theorique], ...(e.previsionnel ? [['Prévisionnel', e.previsionnel]] : []), ['Réalisé', e.realise], ...(e.file_active ? [['File active', e.file_active]] : [])];
+    a += `<table class="rt mens"><thead><tr><th></th>${MOIS.map(m => `<th>${m}</th>`).join('')}<th>Total</th></tr></thead><tbody>
+      ${rows.map(([l, v]) => `<tr><th>${l}</th>${v.map(x => `<td>${fmt(num(x))}</td>`).join('')}<td><b>${l === 'File active' ? '' : fmt(sum(v))}</b></td></tr>`).join('')}
+      <tr><th>Taux</th>${e.realise.map((r, m) => `<td>${num(e.theorique[m]) ? pct(num(r) / num(e.theorique[m])) : '—'}</td>`).join('')}<td><b>${T ? pct(Rr / T) : '—'}</b></td></tr></tbody></table>`;
+    a += `<figure class="chart">${chartSVG(e.theorique, e.realise, `Activité mensuelle ${b.libelle}`)}<figcaption>Activité mensuelle ${N} : réalisé et théorique – ${esc(b.libelle)}</figcaption></figure>`;
+  });
+  if (bl.length > 1 && tot.theorique) a += `<h3>Synthèse des dispositifs</h3>` + tbl(['Volume théorique', ...(tot.hasPrev ? ['Volume prévisionnel'] : []), 'Réalisé', "Taux d'occupation"], [[fmt(tot.theorique), ...(tot.hasPrev ? [fmt(tot.previsionnel)] : []), fmt(tot.realise), pct(tot.realise / tot.theorique)]], 'num');
+  const n1 = br.sources.activiteN1;
+  if (bl.length && n1.length) {
+    const rows = bl.map((b, i) => { const e = blockEff(br, i); const p = n1.find(x => x.code && x.code === b.code) || (bl.length === 1 && n1.length === 1 ? n1[0] : null); if (!p || !e.realise) return null;
+      const T = sum(e.theorique || []), Rr = sum(e.realise);
+      return [esc(b.libelle), fmt(p.realise), p.theorique ? pct(p.realise / p.theorique) : '—', fmt(Rr), T ? pct(Rr / T) : '—', p.realise ? pct((Rr - p.realise) / p.realise) : '—']; }).filter(Boolean);
+    if (rows.length) a += `<h3>Comparaison ${N - 1} / ${N}</h3>` + tbl(['Dispositif', `Réalisé ${N - 1}`, `Taux ${N - 1}`, `Réalisé ${N}`, `Taux ${N}`, 'Évolution du réalisé'], rows, 'num');
+  }
+  if (Object.values(s.bilan.mvt).some(v => String(v).trim())) a += `<h3>Mouvements des personnes accompagnées</h3>` + mvt(s.bilan.mvt);
+  const comp = hasRows(s.bilan.complementaires, ['indicateur', 'valeur']);
+  const mod = moduleFor(br.ra);
+  if (comp.length) a += `<h3>${esc(mod ? mod[1] : 'Indicateurs complémentaires')}</h3>` + tbl(['Indicateur', 'Valeur', 'Commentaire'], comp.map(r => [esc(r.indicateur), esc(r.valeur), esc(r.commentaire)]));
+  if (s.bilan.commentaire.trim()) a += `<h3>Analyse</h3>` + para(s.bilan.commentaire);
+  add('iii1', 2, '1. Bilan quantitatif', a);
+  add('iii2', 2, '2. Bilan qualitatif', para(s.qualitatif));
+
+  // IV
+  add('iv', 1, `IV. Conclusion et perspectives ${N + 1}`, '');
+  const suivi = (s.conclusion.suivi || []).filter(r => String(r.realisation || '').trim());
+  add('iv1', 2, `1. Bilan général de l'année ${N}`, para(s.conclusion.bilan) + (suivi.length ? `<h3>Suivi des perspectives fixées dans le RA ${N - 1}</h3>` + tbl(['Objectif', 'Réalisation', 'Commentaire'], suivi.map(r => [esc(r.objectif), esc(r.realisation), esc(r.commentaire)])) : ''));
+  const persp = hasRows(s.conclusion.perspectives, ['objectif', 'actions']);
+  add('iv2', 2, `2. Perspectives pour ${N + 1}`, persp.length ? tbl(['Objectif', 'Actions', 'Échéance', 'Indicateur de suivi'], persp.map(r => [esc(r.objectif), esc(r.actions), esc(r.echeance), esc(r.indicateur)])) : '');
+
+  // Annexes
+  const anx = s.annexes.filter(x => x.data);
+  const ecarts = Object.entries(br.ecarts);
+  const showEcarts = ecarts.length && (br.statut !== 'Validé' || br.params.annexeEcartsValide);
+  if (anx.length || showEcarts) {
+    add('ann', 1, 'Annexes', '');
+    if (anx.length) add('ann-img', 2, 'Illustrations', anx.map((x, i) => `<figure class="anx"><img src="${x.data}"><figcaption>Annexe ${i + 1}${x.legende ? ' – ' + esc(x.legende) : ''}</figcaption></figure>`).join(''));
+    if (showEcarts) add('ann-ecarts', 2, 'Écarts aux données sources', tbl(['Section', 'Donnée', 'Valeur source', 'Valeur saisie', 'Motif', 'Date'], ecarts.map(([p, e]) => [esc(e.section), esc(e.label), esc(e.source ?? '—'), esc(e.value ?? '—'), esc(e.motif), frDate(e.date)]), 'small'));
+  }
+  return {secs: secs.filter(x => x.lvl === 1 || String(x.html).replace(/<[^>]+>/g, '').trim() || /<img|<svg/.test(x.html)), bloq};
+}
+
+function reportDoc(br) {
+  const N = br.annee, svc = br.ra.libelle, P = br.params;
+  const {secs, bloq} = reportBody(br);
+  // supprimer les titres de niveau 1 sans sous-section
+  const kept = secs.filter((x, i) => x.lvl !== 1 || x.html || (secs[i + 1] && secs[i + 1].lvl === 2));
+  const logo = br.logos?.mlezi ? `<img src="${br.logos.mlezi}" alt="Mlezi Maore – GROUPE SOS">` : `<span class="logo-txt">MLEZI MAORE · GROUPE SOS</span>`;
+  const sos = br.logos?.sos ? `<img src="${br.logos.sos}" alt="GROUPE SOS">` : '';
+  const val = br.validation ? `${esc(br.validation.nom)} (DGA), le ${frDate(br.validation.date)}` : `${esc(P.approbateur)} (DGA) – en attente`;
+  const pageLabel = `RAPPORT D'ACTIVITÉ ${N} – ${svc.toUpperCase()}`;
+  const footer = `Mlezi Maore une association du GROUPE SOS – ${P.adresse} – Tél. 02 69 61 64 00 – secretariat@mlezi-maore.com – www.mlezi-maore.com`;
+  const body = `
+  <section class="cover">
+    <div class="cv-logo">${logo}</div>
+    <table class="cartouche"><tbody>
+      <tr><th colspan="2" class="ct">RAPPORT D'ACTIVITÉ</th></tr>
+      <tr><th>Service</th><td>${esc(svc)}</td></tr>
+      <tr><th>Rédacteur</th><td>${esc(br.ra.redacteur)}</td></tr>
+      <tr><th>Pilote</th><td>${esc(br.ra.directeur)}</td></tr>
+      <tr><th>Année</th><td>${N}</td></tr>
+      <tr><th>Statut</th><td>${esc(br.statut)}</td></tr>
+      <tr><th>Validation</th><td>${val}</td></tr>
+      <tr><th>Page</th><td>1 sur <span class="nbp">…</span></td></tr></tbody></table>
+    ${bloq ? `<div class="bandeau">Brouillon — incomplet</div>` : ''}
+    <div class="cv-title"><div class="t1">Rapport d'activité</div><div class="t2">${esc(svc)} ${N}</div></div>
+    <div class="cv-foot"><div class="addr"><b>Mlezi Maore</b><br>${esc(P.adresse)}<br>Tél. 02 69 61 64 00<br>secretariat@mlezi-maore.com<br>www.mlezi-maore.com</div>
+      <div class="sos">${sos}<div class="mention">${esc(P.mention)}</div></div></div>
+  </section>
+  <div class="runlogo">${logo}</div>
+  <div class="pfoot">${esc(footer)}</div>
+  <section class="toc"><div class="toc-t">SOMMAIRE</div>
+    ${kept.map(x => `<a class="l${x.lvl}" href="#${x.id}"><span>${esc(x.title)}</span></a>`).join('')}
+  </section>
+  ${kept.map(x => `${x.lvl === 1 ? `<h1 id="${x.id}" class="${x.id === 'intro' ? 'first' : ''}">${esc(x.title)}</h1>` : `<h2 id="${x.id}">${esc(x.title)}</h2>`}${x.html}`).join('\n')}`;
+  const css = `
+  @page{size:A4;margin:26mm 16mm 22mm 16mm;
+    @top-left{content:element(runlogo);vertical-align:bottom;padding-bottom:3mm}
+    @bottom-left{content:element(pfoot);width:120mm;vertical-align:top;padding-top:3mm}
+    @bottom-right{content:counter(page) " | " ${cssStr(pageLabel)};font:bold 7pt Arial,sans-serif;color:#CC071E;vertical-align:top;padding-top:3mm;text-align:right}}
+  @page:first{margin:12mm 16mm 12mm 16mm;@top-left{content:none}@bottom-left{content:none}@bottom-right{content:none}}
+  html{font-family:Arial,Helvetica,sans-serif;color:#262626;font-size:10pt;line-height:1.4}
+  body{margin:0}
+  .runlogo{position:running(runlogo)} .runlogo img{width:34mm} .logo-txt{color:#CC071E;font-weight:bold;font-size:9pt}
+  .pfoot{position:running(pfoot);font-size:6.5pt;color:#6D6E71;line-height:1.3}
+  .cover{height:266mm;position:relative;break-after:page}
+  .cv-logo img{width:46mm}
+  .cartouche{position:absolute;top:0;right:0;width:88mm;border-collapse:collapse;font-size:8.5pt}
+  .cartouche th,.cartouche td{border:1px solid #CC071E;padding:1.6mm 2mm;text-align:left;vertical-align:top}
+  .cartouche th{width:25mm;color:#CC071E}
+  .cartouche .ct{background:#CC071E;color:#fff;text-align:center;letter-spacing:.06em}
+  .bandeau{position:absolute;top:62mm;left:0;right:0;text-align:center;background:#F7C450;color:#262626;font-weight:bold;font-size:14pt;padding:3mm;text-transform:uppercase;letter-spacing:.05em}
+  .cv-title{position:absolute;top:110mm;left:0;right:0;text-align:center}
+  .cv-title .t1{font-size:30pt;color:#CC071E;font-weight:bold;text-transform:uppercase;letter-spacing:.03em}
+  .cv-title .t2{font-size:20pt;margin-top:6mm}
+  .cv-title::after{content:"";display:block;width:40mm;height:2.5mm;background:#7ED957;margin:8mm auto 0}
+  .cv-foot{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid #CC071E;padding-top:4mm}
+  .cv-foot .addr{font-size:8pt;color:#6D6E71;line-height:1.45}
+  .cv-foot .sos{text-align:right} .cv-foot .sos img{width:24mm;display:block;margin-left:auto}
+  .cv-foot .mention{font-size:8pt;font-weight:bold;margin-top:2mm}
+  .toc{break-after:page}
+  .toc-t{color:#CC071E;font-size:16pt;font-weight:bold;margin:0 0 6mm;border-bottom:2px solid #7ED957;padding-bottom:1.5mm}
+  .toc a{display:flex;color:#262626;text-decoration:none;margin:1.4mm 0}
+  .toc a.l1{font-weight:bold;text-transform:uppercase;margin-top:3.5mm;color:#CC071E}
+  .toc a.l2{padding-left:7mm}
+  .toc a span{flex:1}
+  .toc a::after{content:target-counter(attr(href), page);padding-left:3mm}
+  h1{color:#CC071E;font-size:15pt;text-transform:uppercase;margin:0 0 5mm;border-bottom:2px solid #7ED957;padding-bottom:1.5mm;break-before:page;break-after:avoid}
+  h2{font-size:12pt;margin:6mm 0 2.5mm;color:#262626;break-after:avoid}
+  h3{font-size:10pt;margin:4mm 0 1.5mm;color:#CC071E;break-after:avoid}
+  p{margin:0 0 2.5mm;text-align:justify;orphans:3;widows:3}
+  table.rt{border-collapse:collapse;width:100%;margin:2mm 0 4mm;font-size:8.5pt;break-inside:auto}
+  table.rt tr{break-inside:avoid}
+  table.rt th{background:#CC071E;color:#fff;text-align:left;padding:1.4mm 2mm;font-weight:bold}
+  table.rt td{border-bottom:.3mm solid #d9d9d9;padding:1.3mm 2mm;vertical-align:top}
+  table.rt.ident th{background:#f2f2f2;color:#262626;width:55mm;border-bottom:.3mm solid #fff}
+  table.rt.num td,table.rt.etp td+td,table.rt.synth td+td{text-align:right}
+  table.mens{font-size:7pt} table.mens th,table.mens td{padding:1mm .8mm;text-align:right} table.mens tbody th{background:#f2f2f2;color:#262626;text-align:left}
+  table.rt.reg .base{font-size:7pt;color:#6D6E71}
+  table.rt.small{font-size:7.5pt}
+  .st{font-weight:bold} .st-ok{color:#3f8a1f} .st-ko{color:#CC071E} .st-so{color:#6D6E71}
+  .two{display:flex;gap:6mm} .two>*{flex:1}
+  figure{margin:3mm 0;break-inside:avoid;text-align:center} figure img{max-width:100%;max-height:200mm} figure.chart svg{width:100%}
+  figcaption{font-size:8pt;color:#6D6E71;font-style:italic;margin-top:1.5mm}
+  .note{font-size:8.5pt;color:#6D6E71;font-style:italic}`;
+  return {css, body, title: `RA_${N}_${safeName(svc)}`};
+}
+function pagedHTML({css, body, title}, autoPrint) {
+  const lib = document.getElementById('lib-paged').textContent;
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>${esc(title)}</title><style>${css}</style>
+  <script>window.PagedConfig={auto:true,after:function(flow){var n=flow&&flow.total||document.querySelectorAll('.pagedjs_page').length;document.querySelectorAll('.nbp').forEach(function(e){e.textContent=n});document.body.setAttribute('data-ready','1');${autoPrint ? "setTimeout(function(){window.print()},400);" : ''}}};<\/script>
+  <script>${lib}<\/script>
+  <style>@media screen{body{background:#e9e9e7}.pagedjs_pages{display:flex;flex-direction:column;align-items:center;gap:8mm;padding:8mm 0}.pagedjs_page{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2)}}</style>
+  </head><body>${body}</body></html>`;
+}
+
+function controleDoc(br) {
+  const N = br.annee, iss = verify(br), ec = Object.entries(br.ecarts);
+  const body = `<div class="runlogo">${br.logos?.mlezi ? `<img src="${br.logos.mlezi}">` : '<span class="logo-txt">MLEZI MAORE · GROUPE SOS</span>'}</div>
+  <h1 style="break-before:auto">Rapport de contrôle qualité</h1>
+  <p><b>${esc(br.ra.libelle)}</b> – RA ${N} – statut : ${esc(br.statut)} – contrôle du ${frDate(nowISO())}</p>
+  ${br.altere ? '<p class="ko"><b>Données sources altérées :</b> l\'empreinte du brouillon ne correspond plus aux données sources générées par le Siège.</p>' : ''}
+  <h2>1. Écarts aux données sources (${ec.length})</h2>
+  ${ec.length ? `<table class="rt small"><thead><tr><th>Section</th><th>Donnée</th><th>Source</th><th>Saisie</th><th>Motif</th><th>Date</th><th>Décision</th></tr></thead><tbody>
+  ${ec.map(([p, e]) => `<tr><td>${esc(e.section)}</td><td>${esc(e.label)}</td><td>${esc(e.source ?? '—')}</td><td>${esc(e.value ?? '—')}</td><td>${esc(e.motif)}</td><td>${frDate(e.date)}</td><td>${esc(e.decision || 'À décider')}</td></tr>`).join('')}</tbody></table>` : '<p>Aucun écart.</p>'}
+  <h2>2. Alertes du contrôle « Vérifier » (${iss.filter(i => i.lvl !== 'info').length})</h2>
+  ${iss.filter(i => i.lvl !== 'info' && !/^(Organigramme|Export FEI|0 FEI)/.test(i.msg)).map(i => `<p>[${i.lvl}] <b>${esc(i.sec)}</b> – ${esc(i.msg)}</p>`).join('') || '<p>Aucune alerte.</p>'}
+  <h2>3. Pièces manquantes</h2>
+  ${iss.filter(i => /^(Organigramme|Export FEI|0 FEI)/.test(i.msg)).map(i => `<p>${esc(i.msg)}</p>`).join('') || '<p>Aucune.</p>'}
+  <h2>Journal</h2><table class="rt small"><thead><tr><th>Date</th><th>Statut</th><th>Nom</th><th>Fonction</th><th>Commentaire</th></tr></thead><tbody>
+  ${(br.journal || []).map(j => `<tr><td>${frDateTime(j.date)}</td><td>${esc(j.statut)}</td><td>${esc(j.nom)}</td><td>${esc(j.fonction)}</td><td>${esc(j.commentaire)}</td></tr>`).join('')}</tbody></table>`;
+  const css = reportDoc(br).css + `@page:first{margin:26mm 16mm 22mm 16mm;@top-left{content:element(runlogo)}@bottom-left{content:element(pfoot)}@bottom-right{content:counter(page)}} .ko{color:#CC071E}`;
+  return {css, body: body.replace('<div class="runlogo">', '<div class="pfoot">Rapport de contrôle qualité – usage interne Siège</div><div class="runlogo">'), title: `Controle_RA_${N}_${safeName(br.ra.libelle)}`};
+}
+
+/* ==========================================================================
+   Vues : Campagne, Saisie, Contrôle qualité, Aperçu — et événements
+   ========================================================================== */
+function render() {
+  normalizeBr(S.br);
+  $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.v === S.view));
+  const lg = S.camp?.logos?.mlezi || S.br?.logos?.mlezi;
+  $('#hdrLogo').innerHTML = lg ? `<img src="${lg}" alt="Mlezi Maore – GROUPE SOS">` : '<b style="color:var(--rouge)">MLEZI MAORE</b>';
+  $('#hdrCtx').textContent = [S.camp ? `Campagne ${S.camp.annee} · ${S.camp.ras.length} RA` : '', S.br ? `Brouillon : ${S.br.ra.libelle} (${S.br.statut})` : ''].filter(Boolean).join(' — ') || 'Aucun fichier ouvert';
+  const m = $('#main'); const y = window.scrollY;
+  m.innerHTML = ({campagne: viewCampagne, saisie: viewSaisie, controle: viewControle, apercu: viewApercu})[S.view]();
+  if (S.view === 'apercu') mountPreview();
+  window.scrollTo(0, y);
+}
+const needCamp = () => `<div class="card"><p>Aucune campagne ouverte. Créez une <b>nouvelle campagne</b> ou ouvrez le fichier de campagne (.json) tenu par le Siège.</p></div>`;
+const badge = s => `<span class="badge ${BADGE[s] || ''}">${esc(s)}</span>`;
+const drop = (k, label, accept, multi) => `<label class="drop" data-drop="${k}">${label}<input type="file" data-file="${k}" accept="${accept}" ${multi ? 'multiple' : ''} hidden></label>`;
+
+/* ---------- Campagne ---------- */
+function viewCampagne() {
+  const c = S.camp; if (!c) return needCamp();
+  const P = c.params, hasBr = Object.keys(c.brouillons).length > 0;
+  return `
+  <h2>Paramètres de la campagne</h2>
+  <div class="grid">
+    <div class="fld"><label>Année N du RA</label><input type="number" data-cp="annee" value="${c.annee}" ${hasBr ? 'disabled title="Brouillons déjà générés : année figée"' : ''}></div>
+    <div class="fld"><label>Adresse du siège (pied de page)</label><input type="text" data-cp="adresse" value="${esc(P.adresse)}"></div>
+    <div class="fld"><label>Mention d'appartenance (couverture)</label><input type="text" data-cp="mention" value="${esc(P.mention)}"></div>
+    <div class="fld"><label>Approbateur DGA par défaut</label><input type="text" data-cp="approbateur" value="${esc(P.approbateur)}"></div>
+    <div class="fld"><label>Annexe « Écarts » dans le PDF validé</label><select data-cp="annexeEcartsValide"><option value="">Retirée (proposition)</option><option value="1" ${P.annexeEcartsValide ? 'selected' : ''}>Conservée</option></select></div>
+  </div>
+  <div class="grid">
+    <div class="card">${c.logos.mlezi ? `<img src="${c.logos.mlezi}" style="height:46px">` : ''}${drop('logoMlezi', '<b>Logo combiné Mlezi Maore + GROUPE SOS</b><br>(PNG, meilleure définition)', 'image/*')}</div>
+    <div class="card">${c.logos.sos ? `<img src="${c.logos.sos}" style="height:46px">` : ''}${drop('logoSos', '<b>Logo GROUPE SOS seul</b><br>(pied de couverture)', 'image/*')}</div>
+  </div>
+
+  <h2>Imports</h2>
+  <div class="grid">
+    <div class="card">${drop('ref', '<b>Référentiel</b> – onglet vue_service<br>(XLSX ou CSV)', '.xlsx,.xls,.csv')}<div class="muted">${c.referentiel.length ? `${c.referentiel.length} services chargés` : 'Non chargé'}</div></div>
+    <div class="card">${drop('actN', `<b>Suivi d'activité ${c.annee}</b><br>un ou plusieurs classeurs XLSX`, '.xlsx,.xls', true)}<div class="muted">${c.activite.N ? `${c.activite.N.sheets.length} onglets lus` : 'Non chargé'}</div></div>
+    <div class="card">${drop('actN1', `<b>Suivi d'activité ${c.annee - 1}</b> (comparaison)<br>un ou plusieurs classeurs XLSX`, '.xlsx,.xls', true)}<div class="muted">${c.activite.N1 ? `${c.activite.N1.sheets.length} onglets lus` : 'Non chargé'}</div></div>
+    <div class="card">${drop('orga', '<b>Organigrammes</b> (PNG/JPEG)<br>nommés S07_organigramme.png…', 'image/*', true)}<div class="muted">${Object.keys(c.organigrammes).length} rattaché(s)</div></div>
+    <div class="card">${drop('feiFull', "<b>Préparer l'export FEI</b><br>export complet Ageval → CSV réduit téléchargé", '.csv')}<div class="muted">Rien n'est conservé ni affiché : seul le fichier réduit est produit.</div></div>
+    <div class="card">${drop('reprise', '<b>Reprise des RA N-1 validés</b><br>Reprise_RA_2025.json', '.json')}<div class="muted">${c.reprise ? `${Object.keys(c.reprise.services).length} services · RA ${c.reprise.annee_source}` : 'Non chargé'}</div></div>
+    <div class="card">${drop('feiRed', '<b>Export FEI réduit</b><br>(10 colonnes autorisées)', '.csv')}<div class="muted">${c.fei ? `${c.fei.rows.length} FEI · ${esc(c.fei.file)}` : 'Non chargé'}</div></div>
+  </div>
+  ${importReport()}
+  ${perimetre()}
+  ${registreCampagne()}
+  ${parDirecteur()}`;
+}
+function importReport() {
+  const c = S.camp; if (!c.ras.length) return '';
+  const raOpts = sel => `<option value="">— non rattaché —</option>` + c.ras.map(r => `<option value="${r.id}" ${r.id === sel ? 'selected' : ''}>${esc(r.libelle)}</option>`).join('');
+  const sidOpts = sel => `<option value="">— choisir —</option>` + c.referentiel.map(r => `<option value="${r.service_id}" ${r.service_id === sel ? 'selected' : ''}>${r.service_id} ${esc(r.service)}</option>`).join('');
+  let h = '<h2>Rapport d\'import</h2>';
+  ['N', 'N1'].forEach(yk => {
+    const A = c.activite[yk]; if (!A) return;
+    const yr = yk === 'N' ? c.annee : c.annee - 1;
+    const linked = A.sheets.filter(sh => rasForSheet(sh, yk).length), orph = A.sheets.filter(sh => !rasForSheet(sh, yk).length);
+    const without = c.ras.filter(ra => !sheetsForRA(ra, yk).length);
+    h += `<details ${yk === 'N' ? 'open' : ''}><summary>Suivi d'activité ${yr} : ${linked.length} onglet(s) rattaché(s), ${orph.length} orphelin(s), ${without.length} RA sans données</summary>
+      <table class="t small"><thead><tr><th>Onglet</th><th>Code</th><th>Rattaché à</th><th>Mois manquants</th></tr></thead><tbody>
+      ${A.sheets.map(sh => { const ras = rasForSheet(sh, yk); const key = yk + '|' + sh.file + '|' + sh.name;
+        return `<tr><td>${esc(sh.name)}<div class="muted">${esc(sh.file)}</div></td><td>${esc(sh.code || '—')}</td>
+        <td>${ras.length > 1 && !(key in c.sheetLinks) ? ras.map(id => esc(getRA(id)?.libelle)).join(' ; ') : `<select data-link="${esc(key)}">${raOpts(ras[0] || '')}</select>`}${key in c.sheetLinks ? ' <span class="chip">manuel</span>' : ''}</td>
+        <td>${sh.missing.length ? sh.missing.map(m => MOIS[m]).join(', ') : '—'}</td></tr>`; }).join('')}</tbody></table>
+      ${without.length ? `<div class="alert">RA sans données d'activité ${yr} : ${without.map(r => esc(r.libelle)).join(', ')}</div>` : ''}</details>`;
+  });
+  if (c.fei) {
+    const un = feiUnmatched(), nUn = un.reduce((s, x) => s + x.n, 0);
+    const N = c.annee; const zero = c.ras.filter(ra => feiAgg(ra, N).n === 0);
+    h += `<details><summary>FEI Ageval : ${c.fei.rows.length} FEI lues (${c.fei.doublons} doublon(s) ignoré(s)) · ${nUn} FEI non rattachées</summary>
+      ${un.length ? `<table class="t small"><thead><tr><th>Etablissement</th><th>Service Ageval</th><th class="n">FEI</th><th>Rattacher à</th></tr></thead><tbody>
+      ${un.map(u => `<tr><td>${esc(u.etab)}</td><td>${esc(u.service)}</td><td class="n">${u.n}</td><td><select data-feimap="${esc(u.etab)}¤${esc(u.service)}">${sidOpts('')}</select></td></tr>`).join('')}</tbody></table>` : '<div class="alert ok">Toutes les FEI sont rattachées.</div>'}
+      ${zero.length ? `<div class="alert">Aucune FEI en ${N} (vraie absence ou service qui ne déclare pas ?) : ${zero.map(r => esc(r.libelle)).join(', ')}</div>` : ''}
+      <details><summary>Table de correspondance Ageval (${c.ageval.length} lignes)</summary><table class="t small"><thead><tr><th>Etablissement (préfixe)</th><th>Service</th><th>service_id</th><th>Note</th></tr></thead><tbody>
+      ${c.ageval.map((m, i) => `<tr><td>${esc(m.prefix)}</td><td>${esc(m.service)}${m.exact ? ' <span class="chip">exact</span>' : ''}</td><td><select data-agmap="${i}">${sidOpts(m.sid)}</select></td><td class="muted">${esc(m.note)}</td></tr>`).join('')}</tbody></table></details></details>`;
+  }
+  const noOrga = c.ras.filter(ra => !orgaForRA(ra));
+  h += `<details><summary>Organigrammes : ${Object.keys(c.organigrammes).length} rattaché(s), ${c.orgaOrphans.length} à rattacher, ${noOrga.length} RA sans organigramme</summary>
+    ${c.orgaOrphans.map((o, i) => `<div class="row card">${o.data ? `<img src="${o.data}" style="height:50px">` : ''}<span>${esc(o.name)}</span>${o.err ? `<span class="alert">${esc(o.err)}</span>` : `<select data-orga="${i}">${sidOpts('')}</select>`}<button class="btn sm ghost" data-orgadel="${i}">Retirer</button></div>`).join('')}
+    ${noOrga.length ? `<div class="alert">Sans organigramme : ${noOrga.map(r => esc(r.libelle)).join(', ')}</div>` : ''}</details>`;
+  return h;
+}
+function perimetre() {
+  const c = S.camp; if (!c.ras.length) return '';
+  return `<h2>Périmètre des RA (${c.ras.length})</h2>
+  <div class="row"><button class="btn sec" data-act="merge">Fusionner la sélection</button><button class="btn ghost" data-act="resetPerim">Réinitialiser depuis le référentiel</button>
+  <span class="muted">Scinder : un RA par code analytique. Fusionner : plusieurs services dans un seul RA. Libellés modifiables.</span></div>
+  <details><summary>Afficher le périmètre détaillé</summary>
+  <table class="t small"><thead><tr><th></th><th>RA (libellé)</th><th>service_id</th><th>Codes analytiques</th><th>ESMS</th><th>CVS obligatoire</th><th>SMJPM</th><th></th></tr></thead><tbody>
+  ${c.ras.map(ra => `<tr><td><input type="checkbox" data-sel="${ra.id}" ${S.sel.has(ra.id) ? 'checked' : ''}></td>
+    <td><input type="text" data-ra="${ra.id}" data-f="libelle" value="${esc(ra.libelle)}"></td><td>${ra.services.join(', ')}${ra.absentRef ? ' <span class="badge b-corr">absent du référentiel</span>' : ''}</td>
+    <td><input type="text" data-ra="${ra.id}" data-f="analytiques" value="${esc(ra.analytiques.join(', '))}"></td>
+    <td><input type="checkbox" data-ra="${ra.id}" data-f="esms" ${ra.esms ? 'checked' : ''}></td><td><input type="checkbox" data-ra="${ra.id}" data-f="cvs_obligatoire" ${ra.cvs_obligatoire ? 'checked' : ''} ${ra.esms ? '' : 'disabled'}></td>
+    <td><input type="checkbox" data-ra="${ra.id}" data-f="smjpm" ${ra.smjpm ? 'checked' : ''}></td>
+    <td>${ra.analytiques.length > 1 && ra.statut === 'À lancer' ? `<button class="btn sm ghost" data-split="${ra.id}">Scinder</button>` : ''}</td></tr>`).join('')}
+  </tbody></table></details>`;
+}
+function registreCampagne() {
+  const c = S.camp, esmsRA = c.ras.filter(r => r.esms); if (!esmsRA.length) return '';
+  const cur = S.regRA && getRA(S.regRA)?.esms ? S.regRA : esmsRA[0].id, ra = getRA(cur), reg = c.registre[cur] || {};
+  return `<h2>Registre des outils 2002-2 (Service d'appui qualité)</h2>
+  <div class="row"><select data-regra="1" style="max-width:420px">${esmsRA.map(r => `<option value="${r.id}" ${r.id === cur ? 'selected' : ''}>${esc(r.libelle)}</option>`).join('')}</select>
+  <span class="muted">${esmsRA.length} RA ESMS. Les modifications faites ici alimentent les brouillons générés ensuite.</span></div>
+  <table class="t small"><thead><tr><th>Outil</th><th>Valeurs</th><th>Statut calculé (31/12/${c.annee})</th><th>Commentaire</th></tr></thead><tbody>
+  ${outilsFor(ra).map(o => { const v = reg[o.k] || {}, st = outilStatut(o, v, ra, c.annee);
+    return `<tr><td><b>${esc(o.label)}</b><div class="muted">${esc(o.base)}</div></td><td>${OUTIL_FIELDS[o.type].map(([f, l, opts]) => `<div>${esc(l.replace(' en N', ' en ' + c.annee))} ${opts ? `<select data-reg="${o.k}" data-f="${f}">${opts.map(x => `<option ${x === (v[f] || '') ? 'selected' : ''}>${x}</option>`).join('')}</select>` : `<input type="text" data-reg="${o.k}" data-f="${f}" value="${esc(v[f] || '')}">`}</div>`).join('')}
+      <label class="small"><input type="checkbox" data-reg="${o.k}" data-f="sans_objet" ${v.sans_objet ? 'checked' : ''}> Sans objet</label></td>
+      <td><span class="badge ${st.s === 'À jour' ? 'b-ctrl' : st.s === 'Sans objet' ? 'b-lancer' : 'b-corr'}">${st.s}</span><div class="muted">${esc(st.why || '')}</div></td>
+      <td><input type="text" maxlength="300" data-reg="${o.k}" data-f="commentaire" value="${esc(v.commentaire || '')}"></td></tr>`; }).join('')}
+  </tbody></table>`;
+}
+function parDirecteur() {
+  const c = S.camp; if (!c.ras.length) return '';
+  const byDir = {}; c.ras.forEach(ra => (byDir[ra.directeur || '(sans directeur)'] = byDir[ra.directeur || '(sans directeur)'] || []).push(ra));
+  const dirs = Object.keys(byDir).sort((a, b) => byDir[b].length - byDir[a].length || a.localeCompare(b));
+  const bySect = {}; c.ras.forEach(ra => bySect[ra.secteur || '—'] = (bySect[ra.secteur || '—'] || 0) + 1);
+  const cnt = {}; c.ras.forEach(ra => cnt[ra.statut] = (cnt[ra.statut] || 0) + 1);
+  return `<h2>RA par directeur</h2>
+  <div class="row">${STATUTS.map(s => `${badge(s)} ${cnt[s] || 0}`).join(' &nbsp; ')}</div>
+  <div class="row" style="margin:10px 0">
+    <button class="btn" data-act="genAll">Générer les brouillons « À lancer »</button>
+    ${GAS ? '<button class="btn sec" data-act="gasPull">Récupérer les brouillons du Drive</button>' : '<label class="btn sec">Réimporter des brouillons renvoyés<input type="file" accept=".json" multiple data-file="reimport" hidden></label>'}
+    <button class="btn ghost" data-act="saveCamp">Enregistrer la campagne (.json)</button>
+    <button class="btn ghost" data-act="csvSuivi">Export suivi (CSV)</button>
+    <button class="btn ghost" data-act="csvConso">Export consolidé (CSV)</button>
+  </div>
+  <table class="t"><thead><tr><th>Directeur / RA</th><th>Secteur</th><th>Direction</th><th>Rédacteur (élabore)</th><th>Statut</th><th style="width:250px">Actions</th></tr></thead><tbody>
+  ${dirs.map(d => `<tr class="grp"><td colspan="6">${esc(d)} — ${byDir[d].length} RA</td></tr>` + byDir[d].map(ra => {
+    const b = c.brouillons[ra.id];
+    return `<tr><td>${esc(ra.libelle)} <span class="muted">${ra.services.join(', ')}${ra.esms ? ' · ESMS' : ''}</span></td><td>${esc(ra.secteur)}</td><td>${esc(ra.direction)}</td><td>${esc(redacteur(ra))}</td><td>${badge(ra.statut)}</td>
+    <td>${b ? `<button class="btn sm ghost" data-dl="${ra.id}">Télécharger</button> <button class="btn sm ghost" data-open="${ra.id}">Ouvrir</button> <button class="btn sm ghost" data-qc="${ra.id}">Contrôle</button>` : `<button class="btn sm" data-gen="${ra.id}">Générer le brouillon</button>`}</td></tr>`; }).join('')).join('')}
+  </tbody><tfoot><tr class="grp"><td colspan="6">${Object.entries(bySect).map(([s, n]) => `${esc(s)} : ${n}`).join(' · ')} — <b>Total : ${c.ras.length} RA</b></td></tr></tfoot></table>`;
+}
+
+/* ---------- Saisie ---------- */
+function viewSaisie() {
+  const br = S.br;
+  if (!br) return `<div class="card"><p>Aucun brouillon ouvert. Utilisez <b>Ouvrir un fichier .json</b> pour charger le brouillon transmis par le Siège.</p>
+    ${S.camp && Object.keys(S.camp.brouillons).length ? `<p>Ou ouvrez un brouillon de la campagne :</p>${Object.keys(S.camp.brouillons).map(id => `<button class="btn sm ghost" data-open="${id}">${esc(getRA(id)?.libelle || id)}</button>`).join(' ')}` : ''}</div>`;
+  const comp = completude(), secs = saisieSections(), nE = Object.keys(br.ecarts).length;
+  const st = br.statut, canEdit = ['En rédaction', 'À corriger', 'Transmis au directeur', 'À lancer'].includes(st);
+  const actions = [];
+  if (['En rédaction', 'À corriger', 'À lancer'].includes(st)) actions.push(`<button class="btn" data-act="toDir">Transmettre au directeur</button>`);
+  if (st === 'Transmis au directeur') actions.push(`<button class="btn" data-act="toSiege">Transmettre au Siège</button>`, `<button class="btn sec" data-act="backChef">Renvoyer au chef de service</button>`);
+  return `<div class="layout"><aside class="toc">
+    <div class="stat"><b>${esc(br.ra.libelle)}</b> – RA ${br.annee}<br>${badge(st)}
+      <div class="prog"><div style="width:${comp.pct}%"></div></div><div class="small">Complétude : ${comp.pct} % · ${comp.bloq} point(s) bloquant(s)</div>
+      <div class="small">Écarts aux sources : <b>${nE}</b></div>
+      <div class="row" style="margin-top:8px"><button class="btn sm sec" data-act="verify">Vérifier</button><button class="btn sm ghost" data-act="saveBr">Enregistrer</button></div>
+      <div class="row" style="margin-top:6px">${actions.join('')}</div></div>
+    ${secs.map(([id, t, l]) => `<a href="#s-${id}" class="${l ? 'l2' : ''}">${esc(t)}</a>`).join('')}
+  </aside><div>
+    ${!canEdit ? `<div class="warnbox">Statut « ${esc(st)} » : le RA est entre les mains du Siège ou de la DGA. Les modifications restent possibles mais seront visibles au prochain contrôle.</div>` : ''}
+    <div id="verifyOut"></div>
+    ${['Transmis au directeur', 'Transmis au Siège', 'Contrôlé', 'Validé'].includes(st) ? `<div class="card" style="border-color:var(--bleu)"><h3 style="margin-top:0">Avis du directeur (obligatoire, n'apparaît pas dans le PDF)</h3>${tx('avis', 'Avis du directeur', {req: true, rows: 3, ro: st !== 'Transmis au directeur'})}</div>` : ''}
+    ${secs.map(([id, t, l, h]) => l ? `<div id="s-${id}"><h3 style="font-size:15px">${esc(t)}</h3>${h}</div>` : `<section class="sx" id="s-${id}"><h2>${esc(t)}</h2>${h}</section>`).join('')}
+    <section class="sx"><h2>Journal</h2><table class="t small"><thead><tr><th>Date</th><th>Statut</th><th>Nom</th><th>Fonction</th><th>Commentaire</th></tr></thead><tbody>
+    ${(br.journal || []).map(j => `<tr><td>${frDateTime(j.date)}</td><td>${esc(j.statut)}</td><td>${esc(j.nom)}</td><td>${esc(j.fonction)}</td><td>${esc(j.commentaire)}</td></tr>`).join('')}</tbody></table></section>
+  </div></div>`;
+}
+function showVerify() {
+  const iss = verify(S.br); const out = $('#verifyOut'); if (!out) return iss;
+  out.innerHTML = `<div class="card"><h3 style="margin-top:0">Résultat de « Vérifier »</h3>${iss.length ? iss.map(i => `<div class="alert ${i.lvl === 'bloquant' ? 'bloq' : i.lvl === 'info' ? 'ok' : ''}"><b>${esc(i.sec)}</b> – ${esc(i.msg)}</div>`).join('') : '<div class="alert ok">Aucune anomalie.</div>'}</div>`;
+  out.scrollIntoView({behavior: 'smooth'}); return iss;
+}
+
+/* ---------- Contrôle qualité ---------- */
+function viewControle() {
+  const c = S.camp; if (!c) return needCamp();
+  const ids = Object.keys(c.brouillons); if (!ids.length) return `<div class="card">Aucun brouillon généré ou réimporté.</div>`;
+  const cur = ids.includes(S.qcRA) ? S.qcRA : (ids.find(id => getRA(id)?.statut === 'Transmis au Siège') || ids[0]); S.qcRA = cur;
+  const br = c.brouillons[cur], iss = verify(br), ec = Object.entries(br.ecarts);
+  const allAcc = ec.every(([, e]) => e.decision === 'Accepté'), bloq = iss.some(i => i.lvl === 'bloquant');
+  return `<div class="row"><select data-qcsel="1" style="max-width:480px">${ids.map(id => `<option value="${id}" ${id === cur ? 'selected' : ''}>${esc(getRA(id)?.libelle || id)} — ${esc(c.brouillons[id].statut)}</option>`).join('')}</select>
+    ${badge(br.statut)} <button class="btn ghost" data-act="qcPdf">Exporter le rapport de contrôle (PDF)</button></div>
+  ${br.altere ? `<div class="alert bloq"><b>Données sources altérées</b> : le fichier a été modifié hors de l'outil (empreinte différente).</div>` : ''}
+  ${br.conflit ? `<div class="alert">${esc(br.conflit)}</div>` : ''}
+  <h2>1. Écarts aux données sources (${ec.length})</h2>
+  ${ec.length ? `<table class="t small"><thead><tr><th>Section</th><th>Donnée</th><th>Valeur source</th><th>Valeur saisie</th><th>Motif</th><th>Date</th><th>Décision du Siège</th></tr></thead><tbody>
+  ${ec.map(([p, e]) => `<tr><td>${esc(e.section)}</td><td>${esc(e.label)}</td><td>${esc(e.source ?? '—')}</td><td><b>${esc(e.value ?? '—')}</b></td><td>${esc(e.motif)}</td><td>${frDate(e.date)}</td>
+    <td><select data-dec="${esc(p)}">${['', 'Accepté', 'Refusé'].map(x => `<option ${x === (e.decision || '') ? 'selected' : ''}>${x}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table>` : '<div class="alert ok">Aucun écart aux données sources.</div>'}
+  <h2>2. Alertes « Vérifier »</h2>${iss.filter(i => i.lvl !== 'info').map(i => `<div class="alert ${i.lvl === 'bloquant' ? 'bloq' : ''}"><b>${esc(i.sec)}</b> – ${esc(i.msg)}</div>`).join('') || '<div class="alert ok">Aucune alerte.</div>'}
+  ${br.statut !== 'Validé' ? '' : `<div class="alert ok">Validé par ${esc(br.validation?.nom)} le ${frDate(br.validation?.date)}.</div>`}
+  <h2>Décision</h2>
+  <div class="row">
+    <button class="btn sec" data-act="qcCorr" ${['Transmis au Siège', 'Contrôlé'].includes(br.statut) ? '' : 'disabled'}>Renvoyer en correction (À corriger)</button>
+    <button class="btn" data-act="qcOk" ${br.statut === 'Transmis au Siège' && allAcc && !bloq && !br.altere ? '' : 'disabled'}>Marquer « Contrôlé »</button>
+    <button class="btn" data-act="qcValid" style="background:#2f6b16;border-color:#2f6b16" ${br.statut === 'Contrôlé' ? '' : 'disabled'}>Valider (DGA)</button>
+    <button class="btn ghost" data-dl="${cur}">Télécharger le brouillon</button>
+    <button class="btn ghost" data-open="${cur}">Ouvrir dans Saisie / Aperçu</button></div>
+  <div class="muted">« Contrôlé » exige : statut Transmis au Siège, chaque écart accepté (un écart refusé doit être corrigé par le chef de service), aucun point bloquant, données non altérées. « Validé » n'est possible que depuis « Contrôlé ».</div>`;
+}
+
+/* ---------- Aperçu ---------- */
+function viewApercu() {
+  if (!S.br) return `<div class="card">Ouvrez un brouillon pour afficher l'aperçu du rapport.</div>`;
+  return `<div class="row" style="margin-bottom:8px"><button class="btn" data-act="print">Imprimer / Enregistrer en PDF</button>
+    <span class="muted">Choisir « Enregistrer au format PDF », format A4, marges « Aucune » ou « Par défaut », sans en-têtes ni pieds de page du navigateur.</span></div>
+    <iframe class="preview" id="preview" title="Aperçu du rapport"></iframe>`;
+}
+function mountPreview() { const f = $('#preview'); if (!f) return; const d = reportDoc(S.br); f.srcdoc = pagedHTML(d); }
+function printIframe(doc) {
+  if (GAS) { const w = window.open('', '_blank'); if (!w) return toast('Autorisez les fenêtres surgissantes pour imprimer.', 6000); w.document.open(); w.document.write(pagedHTML(doc, true)); w.document.close(); return; }
+  let f = $('#printFrame'); if (f) f.remove();
+  f = document.createElement('iframe'); f.id = 'printFrame'; f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(f);
+  const old = document.title; document.title = doc.title;
+  f.srcdoc = pagedHTML(doc);
+  const t0 = Date.now(); const iv = setInterval(() => {
+    const ready = f.contentDocument?.body?.getAttribute('data-ready');
+    if (ready || Date.now() - t0 > 30000) { clearInterval(iv); setTimeout(() => { f.contentWindow.focus(); f.contentWindow.print(); setTimeout(() => { document.title = old; }, 2000); }, 300); }
+  }, 200);
+}
+
+/* ---------- Actions ---------- */
+async function generate(id) {
+  const ra = getRA(id), br = await buildBrouillon(ra);
+  setStatutRA(ra, br, 'En rédaction', {nom: S.actor?.nom || 'Siège', fonction: S.actor?.fonction || 'Direction ressources et métiers et appui transversal'}, 'Brouillon généré et envoyé au rédacteur');
+  S.camp.brouillons[id] = br; return br;
+}
+function setStatutRA(ra, br, statut, actor, comment) { addJournal(br, statut, actor, comment); ra.statut = statut; ra.journal = clone(br.journal); }
+const brFile = br => `RA_${br.annee}_${safeName(br.ra.libelle)}_brouillon.json`;
+async function reimport(files) {
+  const msgs = [];
+  for (const f of files) {
+    try {
+      const b = JSON.parse(await f.text());
+      if (b.kind !== 'brouillon') throw new Error("ce n'est pas un brouillon de RA");
+      if (b.schemaVersion !== SCHEMA) throw new Error(`version de schéma ${b.schemaVersion} ≠ ${SCHEMA}`);
+      if (b.annee !== S.camp.annee) throw new Error(`année ${b.annee} ≠ campagne ${S.camp.annee}`);
+      const ra = getRA(b.raId); if (!ra) throw new Error(`RA ${b.raId} absent du périmètre`);
+      if (stable(b.ra.services) !== stable(ra.services)) throw new Error('service_id différents du périmètre');
+      b.altere = (await hashOf(b.sources)) !== b.sourceHash;
+      const prev = S.camp.brouillons[ra.id], last = x => (x?.journal || []).map(j => j.date).sort().pop() || '';
+      if (prev && last(prev) > last(b)) { prev.conflit = `Conflit : une version plus ancienne (${f.name}) a été importée et ignorée le ${frDateTime(nowISO())}.`; msgs.push(`${f.name} : version plus ancienne, ignorée (conflit signalé)`); continue; }
+      if (prev && last(prev) === last(b) && stable(prev.saisie) !== stable(b.saisie)) b.conflit = 'Conflit : deux versions différentes portent la même date de journal ; la dernière importée est conservée.';
+      S.camp.brouillons[ra.id] = b; ra.statut = b.statut; ra.journal = clone(b.journal);
+      msgs.push(`${b.ra.libelle} : importé (${b.statut})${b.altere ? ' – DONNÉES SOURCES ALTÉRÉES' : ''}`);
+    } catch (e) { msgs.push(`${f.name} refusé : ${e.message}`); }
+  }
+  autosave(); render();
+  await modalForm('Réimport des brouillons', [], {intro: msgs.map(esc).join('<br>'), ok: 'OK'});
+}
+function csvSuivi() {
+  const rows = [['directeur', 'direction', 'secteur', 'ra', 'service_id', 'redacteur', 'statut', 'dernier_changement']];
+  S.camp.ras.slice().sort((a, b) => (a.directeur || '').localeCompare(b.directeur || '')).forEach(ra => rows.push([ra.directeur, ra.direction, ra.secteur, ra.libelle, ra.services.join(', '), redacteur(ra), ra.statut, frDateTime(ra.journal.at(-1)?.date)]));
+  download(`Suivi_campagne_RA_${S.camp.annee}.csv`, toCSV(rows), 'text/csv;charset=utf-8');
+}
+async function csvConso() {
+  const rows = [['service_id', 'service', 'directeur', 'secteur', 'annee', 'dispositif', 'code_analytique', 'indicateur', 'mois', 'valeur']];
+  for (const ra of S.camp.ras) {
+    const br = S.camp.brouillons[ra.id] || await buildBrouillon(ra);
+    br.sources.activite.forEach((b, i) => { const e = blockEff(br, i);
+      Object.entries(e).forEach(([k, arr]) => arr.forEach((v, m) => rows.push([ra.services.join(', '), ra.libelle, ra.directeur, ra.secteur, br.annee, b.libelle, b.code, LINE_LABELS[k], m + 1, v ?? ''])));
+      if (e.theorique && e.realise) e.realise.forEach((r, m) => rows.push([ra.services.join(', '), ra.libelle, ra.directeur, ra.secteur, br.annee, b.libelle, b.code, "Taux d'occupation", m + 1, num(e.theorique[m]) ? (num(r) / num(e.theorique[m])).toFixed(4).replace('.', ',') : '']));
+    });
+  }
+  download(`Activite_consolidee_RA_${S.camp.annee}.csv`, toCSV(rows), 'text/csv;charset=utf-8');
+}
+
+async function onAction(a, el) {
+  const c = S.camp;
+  switch (a) {
+    case 'merge': { const ids = [...S.sel].filter(getRA); if (ids.length < 2) return toast('Cochez au moins deux RA.'); if (ids.some(id => getRA(id).statut !== 'À lancer')) return toast('Seuls des RA « À lancer » peuvent être fusionnés.'); mergeRAs(ids); S.sel.clear(); break; }
+    case 'resetPerim': if (!(await confirmBox('Réinitialiser le périmètre', 'Recalculer un RA par ligne de vue_service ? Les scissions, fusions et statuts seront perdus (brouillons conservés).'))) return; c.ras = []; c.registre = {}; applyReferentiel(c.referentiel); break;
+    case 'genAll': { const todo = c.ras.filter(r => !c.brouillons[r.id]); if (!todo.length) return toast('Tous les brouillons sont déjà générés.'); if (!(await askActor('Direction ressources et métiers et appui transversal'))) return; for (const ra of todo) { const br = await generate(ra.id); if (GAS) { S._gasAction = 'generation'; await download(brFile(br), JSON.stringify(br)); } } toast(GAS ? `${todo.length} brouillon(s) déposés dans « 1. Modèles ».` : `${todo.length} brouillon(s) générés. Téléchargez-les ligne par ligne pour les envoyer.`, 6000); break; }
+    case 'gasPull': await gasPull(); return;
+    case 'saveCamp': download(`Campagne_RA_${c.annee}_${today()}.json`, JSON.stringify(c), 'application/json'); return;
+    case 'csvSuivi': return csvSuivi();
+    case 'csvConso': return csvConso();
+    case 'verify': showVerify(); return;
+    case 'saveBr': download(brFile(S.br), JSON.stringify(S.br), 'application/json'); return;
+    case 'toDir': { const iss = showVerify(); if (iss.some(i => i.lvl === 'bloquant')) return toast('Des sections obligatoires sont vides ou trop longues : voir « Vérifier ».', 5000);
+      const act = await askActor('Chef de service'); if (!act) return; setStatut(S.br, 'Transmis au directeur', act, 'Rédaction terminée'); download(brFile(S.br), JSON.stringify(S.br), 'application/json'); toast('Brouillon enregistré : transmettez le fichier au directeur.', 5000); break; }
+    case 'toSiege': { const av = S.br.saisie.avis.trim(); if (!av) return toast("L'avis du directeur est obligatoire."); if (av.length > 500) return toast("Avis trop long (500 caractères max).");
+      if (verify(S.br).some(i => i.lvl === 'bloquant')) { showVerify(); return toast('Points bloquants à lever avant transmission.'); }
+      const act = await askActor('Directeur'); if (!act) return; setStatut(S.br, 'Transmis au Siège', act, 'Avis : ' + av); download(brFile(S.br), JSON.stringify(S.br), 'application/json'); toast('Brouillon enregistré : transmettez le fichier au Siège.', 5000); break; }
+    case 'backChef': { const r = await modalForm('Renvoyer au chef de service', [{k: 'motif', label: 'Motif', type: 'textarea', required: true, max: 500}]); if (!r) return; const act = await askActor('Directeur'); if (!act) return; setStatut(S.br, 'À corriger', act, r.motif); download(brFile(S.br), JSON.stringify(S.br), 'application/json'); break; }
+    case 'qcCorr': { const br = c.brouillons[S.qcRA]; const r = await modalForm('Renvoyer en correction', [{k: 'motif', label: 'Motif (joint au rapport de contrôle)', type: 'textarea', required: true, max: 1000}]); if (!r) return; const act = await askActor('Direction ressources et métiers et appui transversal'); if (!act) return;
+      setStatutRA(getRA(S.qcRA), br, 'À corriger', act, r.motif); download(brFile(br), JSON.stringify(br), 'application/json'); printIframe(controleDoc(br)); break; }
+    case 'qcOk': { const br = c.brouillons[S.qcRA]; const act = await askActor('Direction ressources et métiers et appui transversal'); if (!act) return; setStatutRA(getRA(S.qcRA), br, 'Contrôlé', act, `Contrôle qualité : ${Object.keys(br.ecarts).length} écart(s) accepté(s)`); c.controles[S.qcRA] = {date: nowISO(), par: act.nom}; if (GAS) { S._gasAction = 'siege'; download(brFile(br), JSON.stringify(br)); } break; }
+    case 'qcValid': { const br = c.brouillons[S.qcRA]; const r = await modalForm('Validation DGA', [{k: 'nom', label: 'Nom de l\'approbateur (DGA)', value: c.params.approbateur, required: true}, {k: 'commentaire', label: 'Commentaire', type: 'textarea', max: 500}]); if (!r) return;
+      br.validation = {nom: r.nom, date: nowISO()}; setStatutRA(getRA(S.qcRA), br, 'Validé', {nom: r.nom, fonction: 'Direction générale adjointe'}, r.commentaire); toast('RA validé. Le PDF final peut être produit depuis l\'Aperçu.'); if (GAS) { S._gasAction = 'siege'; download(brFile(br), JSON.stringify(br)); } break; }
+    case 'qcPdf': printIframe(controleDoc(c.brouillons[S.qcRA])); return;
+    case 'print': { const d = reportDoc(S.br); printIframe(d); return; }
+  }
+  autosave(); render();
+}
+
+/* ---------- Gestion des fichiers ---------- */
+async function onFiles(kind, files) {
+  if (!files.length) return;
+  try {
+    const c = S.camp;
+    switch (kind) {
+      case 'logoMlezi': c.logos.mlezi = await adapters.readDataURL(files[0]); break;
+      case 'logoSos': c.logos.sos = await adapters.readDataURL(files[0]); break;
+      case 'ref': { const rows = parseReferentiel(await adapters.readWorkbook(files[0])); applyReferentiel(rows); toast(`${rows.length} services lus · ${c.ras.length} RA dans le périmètre.`); break; }
+      case 'actN': case 'actN1': { const r = await importActivity(files, kind === 'actN' ? 'N' : 'N1'); toast(`${r.ok} onglet(s) lus${r.ignored.length ? `, ${r.ignored.length} ignoré(s) (structure non reconnue)` : ''}.`, 5000); break; }
+      case 'orga': { const n = await importOrganigrammes(files); toast(`${n} organigramme(s) rattaché(s) automatiquement.`); break; }
+      case 'feiFull': { const n = await prepareFEI(files[0]); toast(`Export réduit téléchargé (${n} FEI, 10 colonnes). Chargez-le dans « Export FEI réduit ».`, 6000); return; }
+      case 'reprise': {
+        const r = JSON.parse(await files[0].text());
+        if (r.schemaVersion !== REPRISE_SCHEMA) throw new Error('Fichier de reprise non reconnu (schemaVersion attendue : ' + REPRISE_SCHEMA + ').');
+        if (r.annee_source !== c.annee - 1) toast(`Attention : reprise des RA ${r.annee_source} pour une campagne ${c.annee}.`, 6000);
+        c.reprise = r; const n = feedRegistre(); toast(`Reprise chargée : ${Object.keys(r.services).length} services ; ${n} valeur(s) ajoutée(s) au registre 2002-2. Les brouillons déjà générés ne sont pas modifiés.`, 7000); break; }
+      case 'feiRed': { const n = await importFEI(files[0]); toast(`${n} FEI importées.`); break; }
+      case 'reimport': await reimport(files); return;
+    }
+    autosave(); render();
+  } catch (e) { console.error(e); await modalForm('Import refusé', [], {intro: esc(e.message), ok: 'OK'}); }
+}
+
+/* Registre 2002-2 alimenté par la reprise : n'écrase jamais une valeur déjà saisie */
+function feedRegistre() {
+  const c = S.camp; let n = 0; if (!c.reprise) return 0;
+  c.ras.filter(ra => ra.esms).forEach(ra => {
+    const reg = c.registre[ra.id] = c.registre[ra.id] || {};
+    const keys = outilsFor(ra).map(o => o.k);
+    ra.services.forEach(sid => {
+      const e = c.reprise.services[sid]; if (!e) return;
+      Object.entries(e.registre || {}).forEach(([k, v]) => {
+        if (!keys.includes(k)) return; const cur = reg[k] = reg[k] || {};
+        ['date', 'type_doc', 'forme', 'debut', 'communiquee'].forEach(f => { if (v[f] && !cur[f]) { cur[f] = v[f]; n++; } });
+        const com = v.commentaire || v.brut; if (com && !cur.commentaire) { cur.commentaire = ('RA ' + c.reprise.annee_source + ' : ' + com).slice(0, 300); n++; }
+      });
+    });
+  });
+  return n;
+}
+
+/* ---------- Événements ---------- */
+function bind() {
+  $('#tabs').addEventListener('click', e => { const v = e.target.dataset.v; if (v) { S.view = v; window.scrollTo(0, 0); render(); } });
+  $('#openJson').addEventListener('change', async e => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    try { const o = JSON.parse(await f.text());
+      if (o.schemaVersion !== SCHEMA) throw new Error(`Version de schéma inconnue : ${o.schemaVersion}`);
+      if (o.kind === 'campagne') { S.camp = o; S.view = 'campagne'; }
+      else if (o.kind === 'brouillon') { S.br = o; S.view = 'saisie'; }
+      else throw new Error('Fichier non reconnu.');
+      autosave(); render(); toast('Fichier ouvert : ' + f.name);
+    } catch (err) { modalForm('Ouverture impossible', [], {intro: esc(err.message), ok: 'OK'}); }
+  });
+  $('#newCamp').addEventListener('click', async () => {
+    const r = await modalForm('Nouvelle campagne', [{k: 'annee', label: 'Année N des rapports (saisie une seule fois)', value: String(new Date().getFullYear()), required: true}],
+      {intro: S.camp ? 'La campagne ouverte sera remplacée dans ce navigateur. Enregistrez-la d\'abord si besoin.' : ''});
+    if (!r) return; const N = parseInt(r.annee, 10); if (!(N > 2000 && N < 2100)) return toast('Année invalide.');
+    S.camp = newCampaign(N); S.view = 'campagne'; autosave(); render();
+  });
+  const main = $('#main');
+  main.addEventListener('click', async e => {
+    const t = e.target.closest('[data-act],[data-gen],[data-dl],[data-open],[data-qc],[data-split],[data-add],[data-del],[data-modfill],[data-orgadel],[data-insctx]'); if (!t) return;
+    const d = t.dataset, c = S.camp;
+    if (d.act) return onAction(d.act, t);
+    if (d.gen) { if (!(await askActor('Direction ressources et métiers et appui transversal'))) return; const br = await generate(d.gen); S._gasAction = 'generation'; download(brFile(br), JSON.stringify(br), 'application/json'); autosave(); return render(); }
+    if (d.dl) { const br = c.brouillons[d.dl]; S._gasAction = 'siege'; return download(brFile(br), JSON.stringify(br), 'application/json'); }
+    if (d.open) { S.br = c.brouillons[d.open]; S.view = 'saisie'; autosave(); return render(); }
+    if (d.qc) { S.qcRA = d.qc; S.view = 'controle'; return render(); }
+    if (d.split) { splitRA(d.split); autosave(); return render(); }
+    if (d.orgadel) { c.orgaOrphans.splice(+d.orgadel, 1); autosave(); return render(); }
+    if (d.insctx) { S.br.saisie.intro.contexte = S.br.repriseInfo.contexte; autosave(); return render(); }
+    if (d.modfill) { const m = moduleFor(S.br.ra); S.br.saisie.bilan.complementaires = m[2].map(x => ({indicateur: x, valeur: '', commentaire: ''})); autosave(); return render(); }
+    if (d.add) { const rows = getP(S.br.saisie, d.add); const o = {}; TABLES[d.add].forEach(([k]) => o[k] = ''); rows.push(o); autosave(); return render(); }
+    if (d.del) { getP(S.br.saisie, d.del).splice(+d.i, 1); autosave(); return render(); }
+  });
+  main.addEventListener('input', e => {
+    const t = e.target, d = t.dataset;
+    if (d.s) { setP(S.br.saisie, d.s, t.value); const cn = $(`[data-cnt="${d.s}"]`); if (cn) { const max = LIMITS[d.s]; cn.textContent = `${t.value.length} / ${max}`; cn.classList.toggle('over', t.value.length > max); } autosave(); }
+    else if (d.tc) { getP(S.br.saisie, d.tc)[+d.i][d.k] = t.value; autosave(); }
+  });
+  main.addEventListener('change', async e => {
+    const t = e.target, d = t.dataset, c = S.camp;
+    if (d.file) { const fl = [...t.files]; t.value = ''; return onFiles(d.file, fl); }
+    if (d.annex) { const f = t.files[0]; if (!f) return; S.br.saisie.annexes.push({data: await adapters.readImage(f), legende: ''}); autosave(); return render(); }
+    if (d.p) return onPrefChange(t);
+    if (d.cp) { if (d.cp === 'annee') { const N = parseInt(t.value, 10); if (N > 2000) c.annee = N; } else if (d.cp === 'annexeEcartsValide') c.params.annexeEcartsValide = !!t.value; else c.params[d.cp] = t.value; autosave(); return render(); }
+    if (d.sel) { t.checked ? S.sel.add(d.sel) : S.sel.delete(d.sel); return; }
+    if (d.relu) { S.br.repris[d.relu].relu = t.checked; if (t.checked) { S.br.repris[d.relu].date = nowISO(); } autosave(); return render(); }
+    if (d.ra) { const ra = getRA(d.ra); if (d.f === 'analytiques') ra.analytiques = codesOf(t.value); else if (t.type === 'checkbox') { ra[d.f] = t.checked; if (d.f === 'esms' || d.f === 'smjpm') { delete c.registre[ra.id]; seedRegistre(); feedRegistre(); } } else ra[d.f] = t.value; autosave(); return render(); }
+    if (d.link) { c.sheetLinks[d.link] = t.value; autosave(); return render(); }
+    if (d.feimap) { const [etab, service] = d.feimap.split('¤'); if (t.value) c.ageval.push({prefix: etab, service, sid: t.value, exact: true, note: 'rattachement manuel'}); autosave(); return render(); }
+    if (d.agmap) { c.ageval[+d.agmap].sid = t.value; autosave(); return render(); }
+    if (d.orga) { const o = c.orgaOrphans[+d.orga]; if (t.value) { c.organigrammes[t.value] = {name: o.name, data: o.data, date: o.date}; c.orgaOrphans.splice(+d.orga, 1); } autosave(); return render(); }
+    if (d.regra) { S.regRA = t.value; return render(); }
+    if (d.reg) { const r = c.registre[S.regRA && getRA(S.regRA)?.esms ? S.regRA : c.ras.find(x => x.esms).id]; r[d.reg] = r[d.reg] || {}; r[d.reg][d.f] = t.type === 'checkbox' ? t.checked : t.value; autosave(); return render(); }
+    if (d.qcsel) { S.qcRA = t.value; return render(); }
+    if (d.dec) { const br = c.brouillons[S.qcRA]; br.ecarts[d.dec].decision = t.value; autosave(); return render(); }
+  });
+}
+async function onPrefChange(el) {
+  if ($('.modal-bg')) return;
+  const br = S.br, p = el.dataset.p, src = getP(br.sources, p), prev = br.ecarts[p];
+  let val = el.value; if (el.dataset.num) val = val.trim() === '' ? null : num(val);
+  if (el.dataset.num && el.value.trim() !== '' && val === null) { toast('Nombre attendu.'); el.value = prev ? prev.value ?? '' : src ?? ''; return; }
+  const same = (a, b) => (a ?? '') === (b ?? '') || (a != null && b != null && String(a) === String(b));
+  if (same(val, src)) { delete br.ecarts[p]; autosave(); return render(); }
+  const r = await modalForm('Modification d\'une donnée pré-remplie', [{k: 'motif', label: 'Motif (obligatoire, 200 caractères max)', type: 'textarea', max: 200, required: true, value: prev?.motif || ''}],
+    {intro: `<b>${esc(el.dataset.label)}</b><br>Valeur source : <b>${esc(src ?? '—')}</b> → valeur saisie : <b>${esc(val ?? '—')}</b><br>La modification sera relevée dans le journal des écarts et contrôlée par le Siège.`});
+  if (!r) { el.value = prev ? (prev.value ?? '') : (src ?? ''); return; }
+  br.ecarts[p] = {source: src ?? null, value: val, motif: r.motif.slice(0, 200), date: nowISO(), label: el.dataset.label, section: el.dataset.sec};
+  autosave(); render();
+}
+
+/* ---------- Démarrage ---------- */
+(async function init() {
+  bind();
+  const [c, b] = await Promise.all([DB.get('campaign'), DB.get('brouillon')]);
+  if (c && c.schemaVersion === SCHEMA) S.camp = c;
+  if (b && b.schemaVersion === SCHEMA) { S.br = (S.camp && S.camp.brouillons[b.raId] && stable(S.camp.brouillons[b.raId].journal) === stable(b.journal)) ? S.camp.brouillons[b.raId] : b; }
+  S.view = S.camp ? 'campagne' : (S.br ? 'saisie' : 'campagne');
+  render();
+  gasInit();
+})();
+
+/* ==========================================================================
+   Mode Drive : actif quand l'outil est servi par la web app Apps Script.
+   Les « téléchargements » deviennent des enregistrements dans le Drive :
+   brouillons -> 1. Modèles / 2. En cours / 3. Soumis à validation / 4. Validés DGA (selon le statut),
+   campagne -> racine du dossier 2026, exports -> dossier Exports.
+   ========================================================================== */
+const GAS = typeof google !== 'undefined' && !!(google.script && google.script.run);
+const gas = (fn, ...a) => new Promise((res, rej) => google.script.run.withSuccessHandler(res).withFailureHandler(e => rej(e))[fn](...a));
+const nonRelus = br => Object.values(br.repris || {}).filter(r => !r.relu).length;
+
+if (GAS) {
+  // eslint-disable-next-line no-global-assign
+  download = function (name, data) {
+    const text = typeof data === 'string' ? data : '';
+    if (/_brouillon\.json$/.test(name)) {
+      const br = JSON.parse(text), action = S._gasAction || 'saisie'; S._gasAction = null;
+      return gas('api_saveBrouillon', text, action, {nonRelus: nonRelus(br)})
+        .then(r => toast(`Brouillon enregistré dans « ${r.folder} ».`, 5000)).catch(e => modalForm('Enregistrement impossible', [], {intro: esc(e.message || e), ok: 'OK'}));
+    }
+    if (/^Campagne_RA_/.test(name)) {
+      const c = JSON.parse(text); c.brouillons = {}; c.controles = c.controles || {};
+      return gas('api_saveCampagne', JSON.stringify(c)).then(() => toast('Campagne enregistrée dans le Drive et suivi mis à jour.', 5000))
+        .catch(e => modalForm('Enregistrement impossible', [], {intro: esc(e.message || e), ok: 'OK'}));
+    }
+    return gas('api_saveExport', name, text).then(() => toast(`« ${name} » déposé dans le dossier Exports.`, 5000))
+      .catch(e => modalForm('Export impossible', [], {intro: esc(e.message || e), ok: 'OK'}));
+  };
+}
+
+async function gasPicker() {
+  let list;
+  try { list = await gas('api_listBrouillons'); } catch (e) { return modalForm('Drive inaccessible', [], {intro: esc(e.message || e), ok: 'OK'}); }
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  const groups = {}; list.forEach(f => (groups[f.folder] = groups[f.folder] || []).push(f));
+  bg.innerHTML = `<div class="modal" style="width:min(640px,94vw)"><h3>Ouvrir un brouillon du Drive</h3>
+    <input type="text" placeholder="Filtrer (service…)" data-q="1" style="margin-bottom:8px">
+    ${Object.keys(groups).sort().map(g => `<details open><summary>${esc(g)} (${groups[g].length})</summary>${groups[g].map(f => `<div class="row" data-name="${esc(norm(f.name))}" style="justify-content:space-between;border-bottom:1px solid var(--bord);padding:3px 0"><span class="small">${esc(f.name)}</span><button class="btn sm ghost" data-gasopen="${f.id}">Ouvrir</button></div>`).join('')}</details>`).join('') || '<p>Aucun brouillon dans les dossiers.</p>'}
+    <div class="act"><button class="btn ghost" data-a="no">Fermer</button></div></div>`;
+  document.body.appendChild(bg);
+  bg.addEventListener('input', e => { if (e.target.dataset.q) { const q = norm(e.target.value); $$('[data-name]', bg).forEach(r => r.style.display = r.dataset.name.includes(q) ? '' : 'none'); } });
+  bg.addEventListener('click', async e => {
+    if (e.target.dataset.a === 'no') return bg.remove();
+    const id = e.target.dataset.gasopen; if (!id) return;
+    try { const o = JSON.parse(await gas('api_getFile', id)); if (o.kind !== 'brouillon') throw new Error('Fichier non reconnu.'); S.br = o; S.view = 'saisie'; bg.remove(); autosave(); render(); toast('Brouillon ouvert : ' + o.ra.libelle); }
+    catch (err) { toast('Ouverture impossible : ' + (err.message || err), 6000); }
+  });
+}
+async function gasLoadCampagne() {
+  try {
+    const t = await gas('api_getCampagne');
+    if (!t) return toast('Aucune campagne enregistrée dans le Drive : créez-la puis « Enregistrer la campagne ».', 6000);
+    S.camp = JSON.parse(t); S.camp.brouillons = {}; S.view = 'campagne'; render();
+    await gasPull();
+  } catch (e) { modalForm('Campagne inaccessible', [], {intro: esc(e.message || e), ok: 'OK'}); }
+}
+async function gasPull() {
+  const list = await gas('api_getAllBrouillons');
+  await reimport(list.map(x => ({name: x.name, text: async () => x.text})));
+}
+async function gasInit() {
+  if (!GAS) return;
+  try { S.who = await gas('api_whoami'); } catch (e) { S.who = {email: '', admin: false}; }
+  const hdr = $('header.app'), anchor = $('label.btn', hdr);
+  const b1 = document.createElement('button'); b1.className = 'btn sec'; b1.textContent = 'Brouillons du Drive'; b1.onclick = gasPicker; hdr.insertBefore(b1, anchor);
+  if (S.who.admin) { const b2 = document.createElement('button'); b2.className = 'btn ghost'; b2.textContent = 'Campagne du Drive'; b2.onclick = gasLoadCampagne; hdr.insertBefore(b2, anchor); }
+  else { $('#newCamp').style.display = 'none'; $$('#tabs [data-v="campagne"], #tabs [data-v="controle"]').forEach(b => b.style.display = 'none'); if (S.view !== 'apercu') S.view = 'saisie'; }
+  $('#hdrCtx').title = S.who.email || '';
+  render();
+}
+
+</script>

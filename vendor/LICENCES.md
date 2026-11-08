@@ -1,0 +1,3 @@
+- xlsx.full.min.js : SheetJS Community Edition 0.18.5 – Apache-2.0
+- paged.polyfill.min.js : Paged.js 0.4.3 – MIT
+- open-sans-*.woff2 : Open Sans (Fontsource) – SIL Open Font License 1.1

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rapports d'activité – Mlezi Maore</title>
+<style>
+@font-face{font-family:"Open Sans";font-weight:400;src:url(data:font/woff2;base64,__FONT400__) format("woff2");}
+@font-face{font-family:"Open Sans";font-weight:700;src:url(data:font/woff2;base64,__FONT700__) format("woff2");}
+:root{--rouge:#CC071E;--vert:#7ED957;--corail:#EB6F4B;--jaune:#F7C450;--bleu:#39A3BB;--saumon:#F39F90;--txt:#262626;--gris:#6D6E71;--bord:#d9d9d9;--fond:#f6f6f5;--pref:#eeeeec;}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Open Sans",Arial,sans-serif;color:var(--txt);font-size:14px;background:#fff}
+header.app{display:flex;align-items:center;gap:16px;padding:10px 20px;border-bottom:3px solid var(--rouge);background:#fff;position:sticky;top:0;z-index:20}
+header.app .logo{height:44px;min-width:90px;display:flex;align-items:center}
+header.app .logo img{height:44px}
+header.app h1{font-size:16px;margin:0;color:var(--rouge);text-transform:uppercase;letter-spacing:.02em}
+header.app .ctx{font-size:12px;color:var(--gris)}
+header.app .sp{flex:1}
+nav.tabs{display:flex;gap:2px;padding:0 20px;background:var(--fond);border-bottom:1px solid var(--bord)}
+nav.tabs button{border:0;background:none;padding:10px 16px;font:inherit;font-weight:700;color:var(--gris);cursor:pointer;border-bottom:3px solid transparent}
+nav.tabs button.on{color:var(--rouge);border-bottom-color:var(--rouge)}
+main{padding:18px 20px 80px;max-width:1280px;margin:0 auto}
+h2{color:var(--rouge);text-transform:uppercase;font-size:16px;margin:26px 0 10px;border-bottom:1px solid var(--bord);padding-bottom:4px}
+h3{font-size:14px;margin:18px 0 8px}
+.muted{color:var(--gris);font-size:12px}
+.btn{display:inline-block;border:1px solid var(--rouge);background:var(--rouge);color:#fff;border-radius:4px;padding:6px 12px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
+.btn.sec{background:#fff;color:var(--rouge)}
+.btn.ghost{background:#fff;color:var(--txt);border-color:var(--bord);font-weight:400}
+.btn.sm{padding:2px 8px;font-size:12px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.card{border:1px solid var(--bord);border-radius:6px;padding:12px 14px;margin:10px 0;background:#fff}
+.drop{border:2px dashed var(--bord);border-radius:6px;padding:12px;text-align:center;color:var(--gris);cursor:pointer;font-size:13px}
+.drop.over{border-color:var(--vert);background:#f3fbef}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+table.t{border-collapse:collapse;width:100%;font-size:13px;margin:6px 0}
+table.t th{background:var(--rouge);color:#fff;text-align:left;padding:5px 6px;font-weight:700}
+table.t td{border-bottom:1px solid var(--bord);padding:4px 6px;vertical-align:top}
+table.t tr.grp td{background:var(--fond);font-weight:700}
+table.t td.n,table.t th.n{text-align:right}
+.badge{display:inline-block;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;background:#eee;white-space:nowrap}
+.st-À.lancer{background:#eee}
+.b-lancer{background:#eee;color:#555}.b-redac{background:#fdf1d3;color:#7a5600}.b-dir{background:#dcEEF3;color:#1f5f6e}.b-siege{background:#d6eef4;color:#174b57}.b-corr{background:#fbe1dc;color:#9b2c14}.b-ctrl{background:#e6f6df;color:#2f6b16}.b-valid{background:#2f6b16;color:#fff}
+.alert{border-left:4px solid var(--corail);background:#fff6f3;padding:6px 10px;margin:4px 0;font-size:13px}
+.alert.bloq{border-color:var(--rouge);background:#fdecee}
+.alert.ok{border-color:var(--vert);background:#f3fbef}
+input[type=text],input[type=number],input[type=date],select,textarea{font:inherit;font-size:13px;border:1px solid var(--bord);border-radius:4px;padding:5px 7px;width:100%;background:#fff;color:var(--txt)}
+textarea{min-height:90px;resize:vertical}
+.pref{background:var(--pref)}
+.pref.mod{background:#fff3cd;border-color:var(--jaune)}
+.fld{margin:8px 0}
+.fld label{display:block;font-size:12px;font-weight:700;margin-bottom:3px}
+.fld .src{font-weight:400;color:var(--gris);font-size:11px;margin-left:6px}
+.req::after{content:" *";color:var(--rouge)}
+.cnt{font-size:11px;color:var(--gris);text-align:right}
+.cnt.over{color:var(--rouge);font-weight:700}
+.mark{color:#9a6b00;font-weight:700;cursor:help}
+.layout{display:grid;grid-template-columns:230px 1fr;gap:20px}
+.toc{position:sticky;top:120px;align-self:start;font-size:12px;max-height:calc(100vh - 140px);overflow:auto}
+.toc a{display:block;color:var(--txt);text-decoration:none;padding:3px 0}
+.toc a.l2{padding-left:12px;color:var(--gris)}
+.toc .stat{border:1px solid var(--bord);border-radius:6px;padding:8px;margin-bottom:10px}
+.prog{height:6px;background:#eee;border-radius:3px;overflow:hidden;margin:4px 0}
+.prog>div{height:100%;background:var(--vert)}
+section.sx{border-top:2px solid var(--rouge);margin-top:22px;padding-top:4px}
+section.sx>h2{border:0;margin-top:6px}
+.t-edit input,.t-edit select{padding:3px 5px}
+.t-edit td{padding:2px 3px}
+.hidden{display:none!important}
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--txt);color:#fff;padding:8px 16px;border-radius:4px;font-size:13px;z-index:100;opacity:0;transition:opacity .2s;pointer-events:none;max-width:80vw}
+#toast.on{opacity:1}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:90}
+.modal{background:#fff;border-radius:6px;padding:16px 18px;width:min(520px,92vw);max-height:90vh;overflow:auto;border-top:4px solid var(--rouge)}
+.modal h3{margin-top:0;color:var(--rouge)}
+.modal .act{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+iframe.preview{width:100%;height:calc(100vh - 170px);border:1px solid var(--bord);background:#e9e9e7}
+.chip{display:inline-block;padding:0 6px;border-radius:3px;background:var(--fond);font-size:11px;margin:1px}
+details>summary{cursor:pointer;font-weight:700;margin:6px 0}
+.small{font-size:12px}
+.repris{font-size:11px;background:#eef6fa;border-left:3px solid var(--bleu);padding:3px 8px;margin:2px 0 4px;display:flex;gap:12px;align-items:center}.repris.ok{background:#f3fbef;border-color:var(--vert)}.repris label{font-weight:400;display:inline;margin:0}
+.warnbox{background:#fff8e1;border:1px solid var(--jaune);padding:8px 10px;border-radius:4px;font-size:13px}
+</style>
+</head>
+<body>
+<header class="app">
+  <div class="logo" id="hdrLogo"></div>
+  <div><h1>Rapports d'activité</h1><div class="ctx" id="hdrCtx">Aucun fichier ouvert</div></div>
+  <div class="sp"></div>
+  <label class="btn ghost">Ouvrir un fichier .json<input type="file" accept=".json,application/json" id="openJson" hidden></label>
+  <button class="btn ghost" id="newCamp">Nouvelle campagne</button>
+</header>
+<nav class="tabs" id="tabs">
+  <button data-v="campagne">Campagne (Siège)</button>
+  <button data-v="saisie">Saisie</button>
+  <button data-v="controle">Contrôle qualité (Siège)</button>
+  <button data-v="apercu">Aperçu / Rapport</button>
+</nav>
+<main id="main"></main>
+<div id="toast"></div>
+<script>__XLSX__</script>
+<script type="text/plain" id="lib-paged">__PAGED__</script>
+<script>
+__APP__
+</script>
+</body>
+</html>
